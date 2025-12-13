@@ -15,7 +15,7 @@
 import 'dotenv/config';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express, { Request, Response } from 'express';
 import { registerVectorTools } from './tools/vector-tools.js';
 import { initializeEmbeddingService } from './services/embedding-service.js';
@@ -63,9 +63,15 @@ async function runStdio(): Promise<void> {
 
 async function runHttp(): Promise<void> {
   const app = express();
+  app.use(express.json({ limit: '10mb' }));
 
-  // Store active transports for cleanup
-  const transports: Map<string, SSEServerTransport> = new Map();
+  // CORS headers for browser access
+  app.use((_req: Request, res: Response, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    next();
+  });
 
   // Health check endpoint
   app.get('/health', (_req: Request, res: Response) => {
@@ -77,45 +83,39 @@ async function runHttp(): Promise<void> {
     });
   });
 
-  // MCP endpoint for SSE communication (matches /mcp pattern)
-  app.get('/mcp', async (req: Request, res: Response) => {
-    console.error('[HTTP] New MCP SSE connection');
+  // MCP endpoint - stateless, creates new transport per request
+  app.post('/mcp', async (req: Request, res: Response) => {
+    try {
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined, // Stateless mode
+        enableJsonResponse: true
+      });
 
-    const transport = new SSEServerTransport('/mcp/message', res);
-    const sessionId = Date.now().toString();
-    transports.set(sessionId, transport);
+      res.on('close', () => {
+        transport.close();
+      });
 
-    // Handle client disconnect
-    req.on('close', () => {
-      console.error('[HTTP] MCP SSE connection closed');
-      transports.delete(sessionId);
-    });
-
-    await server.connect(transport);
-    await transport.start();
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      console.error('MCP request error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
   });
 
-  // Message endpoint for client-to-server communication
-  app.post('/mcp/message', express.json(), async (req: Request, res: Response) => {
-    // Find the active transport and forward the message
-    const transportsArray = Array.from(transports.values());
-    if (transportsArray.length > 0) {
-      const transport = transportsArray[transportsArray.length - 1];
-      await transport.handlePostMessage(req, res);
-    } else {
-      res.status(503).json({ error: 'No active SSE connection' });
-    }
+  // CORS preflight
+  app.options('/mcp', (_req: Request, res: Response) => {
+    res.sendStatus(204);
   });
 
   // Initialize services before starting server
   await initializeServices();
 
   app.listen(PORT, HOST, () => {
-    console.error(`odoo-vector-mcp running on http://${HOST}:${PORT}`);
+    console.error(`odoo-vector-mcp running on http://${HOST}:${PORT}/mcp`);
     console.error('Endpoints:');
-    console.error(`  GET  /health      - Health check`);
-    console.error(`  GET  /mcp         - SSE connection for MCP`);
-    console.error(`  POST /mcp/message - Message handler`);
+    console.error(`  GET  /health - Health check`);
+    console.error(`  POST /mcp    - MCP endpoint`);
   });
 }
 
