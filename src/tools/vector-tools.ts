@@ -6,6 +6,9 @@
  * 2. vector_semantic_search - Natural language search
  * 3. vector_decode - Decode encoded strings
  * 4. vector_sync - Sync data from Odoo
+ *
+ * NEW FORMAT: {TABLE_NUMBER}^{COLUMN_NUMBER}*{VALUE}
+ * Example: 1^10*450000|2^1*Hansen|3^1*Tender RFQ
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -24,6 +27,7 @@ import { decode } from '../services/encoder-service.js';
 import { embed } from '../services/embedding-service.js';
 import { searchDataCollection } from '../services/vector-client.js';
 import { fullSync, syncRecord, getSyncStatus } from '../services/sync-service.js';
+import { TABLE_DISPLAY_NAMES } from '../constants.js';
 import type { VectorFilter } from '../types.js';
 
 /**
@@ -39,22 +43,27 @@ export function registerVectorTools(server: McpServer): void {
     `Search the schema definitions by semantic meaning.
 
 This is the KEY INNOVATION of the self-describing vector database.
-Use this tool to discover what fields are available and what schema codes (O_1, C_1, etc.) mean.
+Use this tool to discover what fields are available and what schema codes mean.
 
-The prefix indicates the SOURCE TABLE:
-- O_  = crm.lead (Opportunity)
-- C_  = res.partner (Contact)
-- S_  = crm.stage (Stage)
-- U_  = res.users (User/Salesperson)
-- T_  = crm.team (Team)
-- ST_ = res.country.state (State)
-- LR_ = crm.lost.reason (Lost Reason)
+Schema codes use NUMERIC format: {TABLE}^{COLUMN}
+The TABLE number indicates the SOURCE TABLE:
+- 1  = crm.lead (Opportunity)
+- 2  = res.partner (Contact)
+- 3  = crm.stage (Stage)
+- 4  = res.users (User/Salesperson)
+- 5  = crm.team (Team)
+- 6  = res.country.state (State)
+- 7  = crm.lost.reason (Lost Reason)
+- 8  = x_specification (Specification)
+- 9  = x_lead_source (Lead Source)
+- 10 = res.partner (Architect)
 
 Examples:
-- "find fields about revenue" → O_10 (expected_revenue)
-- "contact information" → C_10 (email), C_11 (phone)
-- "pipeline stage" → S_1 (stage name)
-- "who is responsible" → U_1 (salesperson name)`,
+- "find fields about revenue" → 1^10 (expected_revenue)
+- "contact information" → 2^10 (email), 2^11 (phone)
+- "pipeline stage" → 3^1 (stage name)
+- "who is responsible" → 4^1 (salesperson name)
+- "specification type" → 8^1 (specification name)`,
     DiscoverSchemaSchema.shape,
     async (args): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
       try {
@@ -83,9 +92,10 @@ Examples:
         ];
 
         for (const result of results) {
-          lines.push(`### ${result.code}`);
-          lines.push(`- **Table**: ${result.table}`);
-          lines.push(`- **Field**: ${result.field}`);
+          const tableName = TABLE_DISPLAY_NAMES[result.table_number] || result.table;
+          lines.push(`### ${result.code} (${tableName})`);
+          lines.push(`- **Table**: ${result.table} (Table ${result.table_number})`);
+          lines.push(`- **Field**: ${result.field} (Column ${result.column_number})`);
           lines.push(`- **Type**: ${result.type}`);
           lines.push(`- **Description**: ${result.semantic}`);
           lines.push(`- **Score**: ${(result.score * 100).toFixed(1)}%`);
@@ -125,7 +135,7 @@ Results include:
 - Opportunity name and ID
 - Similarity score
 - Encoded string (decode with vector_decode)
-- Key metadata (revenue, stage, etc.)`,
+- Key metadata (revenue, stage, contact, specification, etc.)`,
     SemanticSearchSchema.shape,
     async (args): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
       try {
@@ -175,11 +185,19 @@ Results include:
           const result = results[i];
           const p = result.payload;
 
-          lines.push(`### ${i + 1}. ${getDecodedName(p.encoded_string)} (ID: ${p.odoo_id})`);
+          // Use semantic field if available, otherwise decode
+          const opportunityName = p.opportunity_name || getDecodedName(p.encoded_string);
+          lines.push(`### ${i + 1}. ${opportunityName} (ID: ${p.odoo_id})`);
           lines.push(`- **Similarity**: ${(result.score * 100).toFixed(1)}%`);
 
           if (p.expected_revenue) {
             lines.push(`- **Revenue**: ${formatCurrency(p.expected_revenue)}`);
+          }
+          if (p.contact_name) {
+            lines.push(`- **Contact**: ${p.contact_name}`);
+          }
+          if (p.stage_name) {
+            lines.push(`- **Stage**: ${p.stage_name}`);
           }
           if (p.sector) {
             lines.push(`- **Sector**: ${p.sector}`);
@@ -187,8 +205,22 @@ Results include:
           if (p.city || p.state_name) {
             lines.push(`- **Location**: ${[p.city, p.state_name].filter(Boolean).join(', ')}`);
           }
-          if (p.is_lost) {
-            lines.push(`- **Status**: Lost`);
+          if (p.user_name) {
+            lines.push(`- **Salesperson**: ${p.user_name}`);
+          }
+          if (p.specification_name) {
+            lines.push(`- **Specification**: ${p.specification_name}`);
+          }
+          if (p.lead_source_name) {
+            lines.push(`- **Lead Source**: ${p.lead_source_name}`);
+          }
+          if (p.architect_name) {
+            lines.push(`- **Architect**: ${p.architect_name}`);
+          }
+          if (p.is_won) {
+            lines.push(`- **Status**: Won`);
+          } else if (p.is_lost) {
+            lines.push(`- **Status**: Lost${p.lost_reason_name ? ` (${p.lost_reason_name})` : ''}`);
           }
 
           lines.push(`- **Encoded**: \`${truncate(p.encoded_string, 100)}\``);
@@ -219,17 +251,22 @@ Results include:
     'vector_decode',
     `Decode an encoded string from vector search results.
 
-Encoded strings use source-table-prefixed format:
-"O_1*Hospital Project|O_10*450000|C_1*Hansen Yuncken"
+Encoded strings use numeric table-prefixed format:
+"1^1*Hospital Project|1^10*450000|2^1*Hansen Yuncken"
 
-The prefix indicates which Odoo table the value came from:
-- O_  = crm.lead
-- C_  = res.partner
-- S_  = crm.stage
-- U_  = res.users
-- etc.
+The TABLE number indicates which Odoo table the value came from:
+- 1  = crm.lead (Opportunity)
+- 2  = res.partner (Contact)
+- 3  = crm.stage (Stage)
+- 4  = res.users (User)
+- 5  = crm.team (Team)
+- 6  = res.country.state (State)
+- 7  = crm.lost.reason (Lost Reason)
+- 8  = x_specification (Specification)
+- 9  = x_lead_source (Lead Source)
+- 10 = res.partner (Architect)
 
-Returns structured data organized by source table.`,
+Returns structured data organized by source table number.`,
     DecodeSchema.shape,
     async (args): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
       try {
@@ -251,13 +288,20 @@ Returns structured data organized by source table.`,
           lines.push('');
         }
 
-        // Fields by table
+        // Schema codes found
+        lines.push('### Schema Codes Found');
+        lines.push(`\`${decoded._schema_codes.join(', ')}\``);
+        lines.push('');
+
+        // Fields by table NUMBER
         lines.push('### Fields by Source Table');
         lines.push('');
 
-        for (const [table, fields] of Object.entries(decoded._by_table)) {
-          lines.push(`#### ${table}`);
-          for (const [field, value] of Object.entries(fields)) {
+        for (const [tableNumberStr, fields] of Object.entries(decoded._by_table)) {
+          const tableNumber = parseInt(tableNumberStr, 10);
+          const tableName = TABLE_DISPLAY_NAMES[tableNumber] || `Table ${tableNumber}`;
+          lines.push(`#### Table ${tableNumber}: ${tableName}`);
+          for (const [field, value] of Object.entries(fields as Record<string, unknown>)) {
             const displayValue = typeof value === 'number' && field.includes('revenue')
               ? formatCurrency(value as number)
               : String(value);
@@ -273,7 +317,8 @@ Returns structured data organized by source table.`,
         lines.push('|------|-------|-------|-------|');
 
         for (const field of decoded.fields) {
-          lines.push(`| ${field.code} | ${field.table} | ${field.field} | ${truncate(String(field.parsedValue), 40)} |`);
+          const tableName = TABLE_DISPLAY_NAMES[field.table_number] || field.table;
+          lines.push(`| ${field.code} | ${tableName} | ${field.field} | ${truncate(String(field.parsedValue), 40)} |`);
         }
 
         return {
@@ -302,7 +347,12 @@ Actions:
 - **full_sync**: Rebuild the entire vector index from Odoo (may take several minutes)
 - **sync_record**: Sync a specific opportunity by ID
 
-Use "status" first to check current state before running a full sync.`,
+Use "status" first to check current state before running a full sync.
+
+IMPORTANT: After deploying code changes to the encoding format, you should:
+1. Delete the Qdrant collections manually
+2. Redeploy the server (which recreates collections)
+3. Run full_sync to populate with new format`,
     SyncSchema.shape,
     async (args): Promise<{ content: Array<{ type: 'text'; text: string }> }> => {
       try {
@@ -325,6 +375,10 @@ Use "status" first to check current state before running a full sync.`,
               `- **Exists**: ${schemaStatus.exists ? 'Yes' : 'No'}`,
               `- **Vectors**: ${schemaStatus.vectorCount}`,
               `- **Definitions**: ${schemaStatus.definitionCount}`,
+              '',
+              '### Encoding Format',
+              '- **Pattern**: `{TABLE}^{COLUMN}*{VALUE}`',
+              '- **Tables**: 10 (Opportunity, Contact, Stage, User, Team, State, LostReason, Specification, LeadSource, Architect)',
             ];
 
             return {
@@ -429,9 +483,10 @@ function truncate(str: string, maxLength: number): string {
 }
 
 /**
- * Extract name from encoded string (O_1 field)
+ * Extract name from encoded string (1^1 field = opportunity name)
  */
 function getDecodedName(encodedString: string): string {
-  const match = encodedString.match(/O_1\*([^|]+)/);
+  // New format: 1^1*Name
+  const match = encodedString.match(/1\^1\*([^|]+)/);
   return match ? match[1] : 'Unknown';
 }

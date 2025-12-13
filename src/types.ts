@@ -1,5 +1,8 @@
 /**
  * TypeScript type definitions for odoo-vector-mcp
+ *
+ * Updated for numeric table-prefixed encoding system:
+ * Format: {TABLE_NUMBER}^{COLUMN_NUMBER}*{VALUE}
  */
 
 // =============================================================================
@@ -44,8 +47,13 @@ export function getRelationId(relation: OdooRelation | undefined): number | unde
 
 /**
  * CRM Lead (Opportunity) from Odoo
+ *
+ * Includes all fields from 10 tables:
+ * - Table 1: crm.lead (core opportunity data)
+ * - Tables 2-10: Related entities via foreign keys
  */
 export interface CrmLead {
+  // Table 1 - Core fields
   id: number;
   name: string;
   expected_revenue?: number;
@@ -57,14 +65,20 @@ export interface CrmLead {
   city?: string | false;
   x_sector?: string | false;
   active?: boolean;
+  is_won?: boolean;
 
-  // Relation fields (many2one)
-  partner_id?: OdooRelation;
-  stage_id?: OdooRelation;
-  user_id?: OdooRelation;
-  team_id?: OdooRelation;
-  state_id?: OdooRelation;
-  lost_reason_id?: OdooRelation;
+  // Standard relation fields (many2one)
+  partner_id?: OdooRelation;        // Table 2: res.partner (Contact)
+  stage_id?: OdooRelation;          // Table 3: crm.stage (Stage)
+  user_id?: OdooRelation;           // Table 4: res.users (User)
+  team_id?: OdooRelation;           // Table 5: crm.team (Team)
+  state_id?: OdooRelation;          // Table 6: res.country.state (State)
+  lost_reason_id?: OdooRelation;    // Table 7: crm.lost.reason (Lost Reason)
+
+  // Custom relation fields (many2one)
+  x_specification_id?: OdooRelation; // Table 8: x_specification (Specification)
+  x_lead_source_id?: OdooRelation;   // Table 9: x_lead_source (Lead Source)
+  x_architect_id?: OdooRelation;     // Table 10: res.partner (Architect)
 }
 
 /**
@@ -83,10 +97,14 @@ export interface CrmStage {
 
 /**
  * Schema vector stored in crm_schema collection
+ *
+ * Uses numeric code format: {TABLE_NUMBER}^{COLUMN_NUMBER}
+ * Example: "1^10" for crm.lead.expected_revenue
  */
 export interface SchemaVector {
-  id: string;              // Schema code: "O_1", "C_2", etc.
-  code: string;            // Same as id
+  id: string;              // Schema code: "1^1", "2^10", etc.
+  table_number: number;    // Table identifier: 1, 2, 3...
+  column_number: number;   // Column identifier: 1, 10, 20...
   table: string;           // Odoo table: "crm.lead"
   field: string;           // Odoo field: "name"
   type: string;            // Data type: "char", "integer", etc.
@@ -97,7 +115,9 @@ export interface SchemaVector {
  * Schema search result with similarity score
  */
 export interface SchemaSearchResult {
-  code: string;
+  code: string;            // "1^10"
+  table_number: number;    // 1
+  column_number: number;   // 10
   table: string;
   field: string;
   type: string;
@@ -111,23 +131,45 @@ export interface SchemaSearchResult {
 
 /**
  * Single decoded field from an encoded string
+ *
+ * Example: From "1^10*450000", produces:
+ * {
+ *   code: "1^10",
+ *   table_number: 1,
+ *   column_number: 10,
+ *   value: "450000",
+ *   table: "crm.lead",
+ *   field: "expected_revenue",
+ *   type: "float",
+ *   parsedValue: 450000
+ * }
  */
 export interface DecodedField {
-  code: string;            // "O_1"
+  code: string;            // "1^10"
+  table_number: number;    // 1
+  column_number: number;   // 10
   value: string;           // Raw value from encoded string
   table: string;           // "crm.lead"
-  field: string;           // "name"
-  type: string;            // "char"
+  field: string;           // "expected_revenue"
+  type: string;            // "float"
   parsedValue: unknown;    // Type-converted value
 }
 
 /**
- * Fully decoded record with organization by table
+ * Fully decoded record with organization by table number
+ *
+ * Example _by_table structure:
+ * {
+ *   1: { name: "Hospital Project", expected_revenue: 450000, ... },
+ *   2: { name: "Hansen Yuncken" },
+ *   3: { name: "Tender RFQ" }
+ * }
  */
 export interface DecodedRecord {
   raw: string;             // Original encoded string
   fields: DecodedField[];  // All decoded fields
-  _by_table: Record<string, Record<string, unknown>>;  // Organized by table
+  _schema_codes: string[]; // List of schema codes found: ["1^1", "1^10", "2^1"]
+  _by_table: Record<number, Record<string, unknown>>;  // Organized by table NUMBER
 }
 
 // =============================================================================
@@ -136,6 +178,8 @@ export interface DecodedRecord {
 
 /**
  * Payload stored with each opportunity vector in crm_data
+ *
+ * Contains indexed fields for efficient filtering plus encoded string
  */
 export interface OpportunityPayload {
   odoo_id: number;
@@ -143,7 +187,7 @@ export interface OpportunityPayload {
   encoded_string: string;
   semantic_text: string;
 
-  // Indexed fields for filtering
+  // Core indexed fields for filtering
   stage_id?: number;
   user_id?: number;
   team_id?: number;
@@ -156,6 +200,22 @@ export interface OpportunityPayload {
   city?: string;
   state_name?: string;
   create_date?: string;
+
+  // New indexed fields (Tables 8-10)
+  specification_id?: number;
+  specification_name?: string;
+  lead_source_id?: number;
+  lead_source_name?: string;
+  architect_id?: number;
+  architect_name?: string;
+
+  // Semantic fields for rich display
+  opportunity_name?: string;
+  contact_name?: string;
+  stage_name?: string;
+  user_name?: string;
+  team_name?: string;
+  lost_reason_name?: string;
 
   // Sync metadata
   sync_timestamp: string;
@@ -182,6 +242,8 @@ export interface VectorQueryOptions {
 
 /**
  * Vector filter for structured queries
+ *
+ * Supports filtering by indexed payload fields
  */
 export interface VectorFilter {
   stage_id?: number | { $in: number[] };
@@ -193,6 +255,11 @@ export interface VectorFilter {
   sector?: string;
   expected_revenue?: { $gte?: number; $lte?: number };
   create_date?: { $gte?: string; $lte?: string };
+
+  // New filters for Tables 8-10
+  specification_id?: number;
+  lead_source_id?: number;
+  architect_id?: number;
 }
 
 // =============================================================================

@@ -4,8 +4,8 @@
  * Orchestrates data synchronization from Odoo to the vector database.
  *
  * Flow:
- * 1. Fetch opportunities from Odoo
- * 2. Encode each opportunity to prefixed string
+ * 1. Fetch opportunities from Odoo (10 tables of data)
+ * 2. Encode each opportunity to numeric prefixed string (1^10*value format)
  * 3. Build semantic text for embedding
  * 4. Generate embeddings
  * 5. Upsert to crm_data collection with encoded string in payload
@@ -302,6 +302,8 @@ export async function getSyncStatus(): Promise<SyncStatus> {
 
 /**
  * Build payload for vector storage
+ *
+ * Includes all indexed fields for filtering and semantic fields for display
  */
 function buildPayload(lead: CrmLead, encodedString: string, semanticText: string): OpportunityPayload {
   const isLost = !lead.active || isValidRelation(lead.lost_reason_id);
@@ -312,19 +314,35 @@ function buildPayload(lead: CrmLead, encodedString: string, semanticText: string
     encoded_string: encodedString,
     semantic_text: semanticText,
 
-    // Indexed fields for filtering
+    // Core indexed fields for filtering (Tables 1-7)
     stage_id: getRelationId(lead.stage_id),
     user_id: getRelationId(lead.user_id),
     team_id: getRelationId(lead.team_id),
     expected_revenue: lead.expected_revenue,
     probability: lead.probability,
-    is_won: false, // Would need to check stage.is_won
+    is_won: lead.is_won === true,
     is_lost: isLost,
     is_active: lead.active !== false,
     sector: typeof lead.x_sector === 'string' ? lead.x_sector : undefined,
     city: typeof lead.city === 'string' ? lead.city : undefined,
     state_name: getRelationName(lead.state_id) || undefined,
     create_date: lead.create_date,
+
+    // New indexed fields for Tables 8-10
+    specification_id: getRelationId(lead.x_specification_id),
+    specification_name: getRelationName(lead.x_specification_id) || undefined,
+    lead_source_id: getRelationId(lead.x_lead_source_id),
+    lead_source_name: getRelationName(lead.x_lead_source_id) || undefined,
+    architect_id: getRelationId(lead.x_architect_id),
+    architect_name: getRelationName(lead.x_architect_id) || undefined,
+
+    // Semantic fields for rich display
+    opportunity_name: lead.name,
+    contact_name: getRelationName(lead.partner_id) || undefined,
+    stage_name: getRelationName(lead.stage_id) || undefined,
+    user_name: getRelationName(lead.user_id) || undefined,
+    team_name: getRelationName(lead.team_id) || undefined,
+    lost_reason_name: getRelationName(lead.lost_reason_id) || undefined,
 
     // Sync metadata
     sync_timestamp: new Date().toISOString(),

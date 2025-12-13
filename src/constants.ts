@@ -1,9 +1,12 @@
 /**
  * Constants for odoo-vector-mcp
  *
- * This file defines the source-table-prefixed encoding system.
- * Each prefix indicates which Odoo table the field comes from,
+ * This file defines the numeric table-prefixed encoding system.
+ * Each numeric prefix indicates which Odoo table the field comes from,
  * providing clear data lineage in the encoded strings.
+ *
+ * NEW FORMAT: {TABLE_NUMBER}^{COLUMN_NUMBER}*{VALUE}
+ * Example: 1^10*450000|2^1*Hansen|3^1*Tender RFQ
  */
 
 // =============================================================================
@@ -36,66 +39,124 @@ export const VOYAGE_CONFIG = {
 } as const;
 
 // =============================================================================
-// SOURCE TABLE PREFIXES
+// TABLE MAPPING (Numeric IDs)
 // =============================================================================
 
 /**
- * TABLE PREFIXES - The core of the self-describing architecture
+ * TABLE MAPPING - The core of the self-describing architecture
  *
- * Each prefix identifies which Odoo table the field comes from:
- * - O_  = crm.lead (Opportunity)
- * - C_  = res.partner (Contact/Company)
- * - S_  = crm.stage (Pipeline Stage)
- * - U_  = res.users (User/Salesperson)
- * - T_  = crm.team (Sales Team)
- * - ST_ = res.country.state (State/Territory)
- * - LR_ = crm.lost.reason (Lost Reason)
+ * Each number identifies which Odoo table the field comes from:
+ * - 1  = crm.lead (Opportunity)
+ * - 2  = res.partner (Contact/Company)
+ * - 3  = crm.stage (Pipeline Stage)
+ * - 4  = res.users (User/Salesperson)
+ * - 5  = crm.team (Sales Team)
+ * - 6  = res.country.state (State/Territory)
+ * - 7  = crm.lost.reason (Lost Reason)
+ * - 8  = x_specification (Specification - Custom)
+ * - 9  = x_lead_source (Lead Source - Custom)
+ * - 10 = res.partner (Architect - same table, different role)
  */
-export const TABLE_PREFIXES = {
-  O: 'crm.lead',
-  C: 'res.partner',
-  S: 'crm.stage',
-  U: 'res.users',
-  T: 'crm.team',
-  ST: 'res.country.state',
-  LR: 'crm.lost.reason',
-} as const;
+export const TABLE_MAPPING: Record<number, string> = {
+  1: 'crm.lead',
+  2: 'res.partner',
+  3: 'crm.stage',
+  4: 'res.users',
+  5: 'crm.team',
+  6: 'res.country.state',
+  7: 'crm.lost.reason',
+  8: 'x_specification',
+  9: 'x_lead_source',
+  10: 'res.partner', // Architect (same table, different role)
+};
 
-export type TablePrefix = keyof typeof TABLE_PREFIXES;
+export const REVERSE_TABLE_MAPPING: Record<string, number> = {
+  'crm.lead': 1,
+  'res.partner': 2,
+  'crm.stage': 3,
+  'res.users': 4,
+  'crm.team': 5,
+  'res.country.state': 6,
+  'crm.lost.reason': 7,
+  'x_specification': 8,
+  'x_lead_source': 9,
+  // Note: Architect uses table 10 but maps to res.partner
+};
+
+// Table display names for human-readable output
+export const TABLE_DISPLAY_NAMES: Record<number, string> = {
+  1: 'Opportunity',
+  2: 'Contact',
+  3: 'Stage',
+  4: 'User',
+  5: 'Team',
+  6: 'State',
+  7: 'Lost Reason',
+  8: 'Specification',
+  9: 'Lead Source',
+  10: 'Architect',
+};
 
 // =============================================================================
-// SCHEMA DEFINITIONS (MVP: 23 fields)
+// SCHEMA DEFINITIONS (~35 fields)
 // =============================================================================
 
 /**
- * Each schema definition maps a code to its source and semantic meaning.
+ * Each schema definition maps a numeric code to its source and semantic meaning.
  *
- * Naming Convention:
- * - {PREFIX}_{SEQUENCE}
- * - Sequence ranges:
+ * Code Format: {TABLE_NUMBER}^{COLUMN_NUMBER}
+ *
+ * Column Number Ranges:
  *   - 1-9:   Primary identifiers (name, id)
  *   - 10-19: Numeric/financial fields
- *   - 20-29: Text/description fields
- *   - 30-39: Date/time fields
- *   - 40-49: Location/classification fields
+ *   - 20-29: Date/time fields
+ *   - 30-39: Location fields
+ *   - 40-49: Boolean/status fields
+ *   - 50-59: Custom/classification fields
+ *   - 90-99: Foreign key IDs
  */
 export interface SchemaDefinition {
-  code: string;           // e.g., "O_1"
-  table: string;          // e.g., "crm.lead"
-  field: string;          // e.g., "name"
+  table_number: number;     // e.g., 1
+  column_number: number;    // e.g., 10
+  table: string;            // e.g., "crm.lead"
+  field: string;            // e.g., "expected_revenue"
   type: 'char' | 'integer' | 'float' | 'text' | 'datetime' | 'date' | 'boolean' | 'selection';
-  semantic: string;       // Human-readable description for embedding
-  required: boolean;      // Is this field required?
-  searchable: boolean;    // Should this be included in semantic text?
+  semantic: string;         // Human-readable description for embedding
+  required: boolean;        // Is this field required?
+  searchable: boolean;      // Should this be included in semantic text?
 }
 
-export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
+// Helper to get schema code string
+export function getSchemaCode(def: SchemaDefinition): string {
+  return `${def.table_number}^${def.column_number}`;
+}
+
+// Helper to get schema by table and column
+export function getSchemaByTableColumn(tableNumber: number, columnNumber: number): SchemaDefinition | undefined {
+  return SCHEMA_DEFINITIONS.find(
+    def => def.table_number === tableNumber && def.column_number === columnNumber
+  );
+}
+
+// Helper to get schema by code string
+export function getSchemaByCode(code: string): SchemaDefinition | undefined {
+  const caretIndex = code.indexOf('^');
+  if (caretIndex === -1) return undefined;
+
+  const tableNumber = parseInt(code.substring(0, caretIndex), 10);
+  const columnNumber = parseInt(code.substring(caretIndex + 1), 10);
+
+  return getSchemaByTableColumn(tableNumber, columnNumber);
+}
+
+export const SCHEMA_DEFINITIONS: SchemaDefinition[] = [
   // ═══════════════════════════════════════════════════════════════════════════
-  // O_ (crm.lead - Opportunity) - 10 fields
+  // Table 1 (crm.lead - Opportunity) - Core Fields
   // ═══════════════════════════════════════════════════════════════════════════
 
-  O_1: {
-    code: 'O_1',
+  {
+    table_number: 1,
+    column_number: 1,
     table: 'crm.lead',
     field: 'name',
     type: 'char',
@@ -103,8 +164,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: true,
     searchable: true,
   },
-  O_2: {
-    code: 'O_2',
+  {
+    table_number: 1,
+    column_number: 2,
     table: 'crm.lead',
     field: 'id',
     type: 'integer',
@@ -112,8 +174,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: true,
     searchable: false,
   },
-  O_10: {
-    code: 'O_10',
+  {
+    table_number: 1,
+    column_number: 10,
     table: 'crm.lead',
     field: 'expected_revenue',
     type: 'float',
@@ -121,8 +184,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: false,
     searchable: true,
   },
-  O_11: {
-    code: 'O_11',
+  {
+    table_number: 1,
+    column_number: 11,
     table: 'crm.lead',
     field: 'probability',
     type: 'integer',
@@ -130,17 +194,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: false,
     searchable: true,
   },
-  O_20: {
-    code: 'O_20',
-    table: 'crm.lead',
-    field: 'description',
-    type: 'text',
-    semantic: 'Detailed description, notes, and context about the opportunity',
-    required: false,
-    searchable: true,
-  },
-  O_30: {
-    code: 'O_30',
+  {
+    table_number: 1,
+    column_number: 20,
     table: 'crm.lead',
     field: 'create_date',
     type: 'datetime',
@@ -148,8 +204,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: true,
     searchable: false,
   },
-  O_31: {
-    code: 'O_31',
+  {
+    table_number: 1,
+    column_number: 21,
     table: 'crm.lead',
     field: 'write_date',
     type: 'datetime',
@@ -157,8 +214,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: false,
     searchable: false,
   },
-  O_32: {
-    code: 'O_32',
+  {
+    table_number: 1,
+    column_number: 22,
     table: 'crm.lead',
     field: 'date_closed',
     type: 'date',
@@ -166,8 +224,19 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: false,
     searchable: false,
   },
-  O_40: {
-    code: 'O_40',
+  {
+    table_number: 1,
+    column_number: 25,
+    table: 'crm.lead',
+    field: 'description',
+    type: 'text',
+    semantic: 'Detailed description, notes, and context about the opportunity',
+    required: false,
+    searchable: true,
+  },
+  {
+    table_number: 1,
+    column_number: 30,
     table: 'crm.lead',
     field: 'city',
     type: 'char',
@@ -175,8 +244,29 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: false,
     searchable: true,
   },
-  O_41: {
-    code: 'O_41',
+  {
+    table_number: 1,
+    column_number: 40,
+    table: 'crm.lead',
+    field: 'active',
+    type: 'boolean',
+    semantic: 'Whether the opportunity is active (true) or archived (false)',
+    required: false,
+    searchable: false,
+  },
+  {
+    table_number: 1,
+    column_number: 41,
+    table: 'crm.lead',
+    field: 'is_won',
+    type: 'boolean',
+    semantic: 'Whether the opportunity has been won (true) or not (false)',
+    required: false,
+    searchable: true,
+  },
+  {
+    table_number: 1,
+    column_number: 50,
     table: 'crm.lead',
     field: 'x_sector',
     type: 'selection',
@@ -186,11 +276,107 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // C_ (res.partner - Contact/Company) - 4 fields
+  // Table 1 (crm.lead) - Foreign Key IDs (90-99)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  C_1: {
-    code: 'C_1',
+  {
+    table_number: 1,
+    column_number: 90,
+    table: 'crm.lead',
+    field: 'partner_id',
+    type: 'integer',
+    semantic: 'Foreign key to Contact/Company (res.partner) - links opportunity to customer',
+    required: false,
+    searchable: false,
+  },
+  {
+    table_number: 1,
+    column_number: 91,
+    table: 'crm.lead',
+    field: 'stage_id',
+    type: 'integer',
+    semantic: 'Foreign key to Pipeline Stage (crm.stage) - current stage in sales process',
+    required: false,
+    searchable: false,
+  },
+  {
+    table_number: 1,
+    column_number: 92,
+    table: 'crm.lead',
+    field: 'user_id',
+    type: 'integer',
+    semantic: 'Foreign key to Salesperson (res.users) - assigned owner',
+    required: false,
+    searchable: false,
+  },
+  {
+    table_number: 1,
+    column_number: 93,
+    table: 'crm.lead',
+    field: 'team_id',
+    type: 'integer',
+    semantic: 'Foreign key to Sales Team (crm.team) - assigned team',
+    required: false,
+    searchable: false,
+  },
+  {
+    table_number: 1,
+    column_number: 94,
+    table: 'crm.lead',
+    field: 'state_id',
+    type: 'integer',
+    semantic: 'Foreign key to State/Territory (res.country.state) - location',
+    required: false,
+    searchable: false,
+  },
+  {
+    table_number: 1,
+    column_number: 95,
+    table: 'crm.lead',
+    field: 'lost_reason_id',
+    type: 'integer',
+    semantic: 'Foreign key to Lost Reason (crm.lost.reason) - why deal was lost',
+    required: false,
+    searchable: false,
+  },
+  {
+    table_number: 1,
+    column_number: 96,
+    table: 'crm.lead',
+    field: 'x_specification_id',
+    type: 'integer',
+    semantic: 'Foreign key to Specification (x_specification) - project specification type',
+    required: false,
+    searchable: false,
+  },
+  {
+    table_number: 1,
+    column_number: 97,
+    table: 'crm.lead',
+    field: 'x_lead_source_id',
+    type: 'integer',
+    semantic: 'Foreign key to Lead Source (x_lead_source) - where the lead came from',
+    required: false,
+    searchable: false,
+  },
+  {
+    table_number: 1,
+    column_number: 98,
+    table: 'crm.lead',
+    field: 'x_architect_id',
+    type: 'integer',
+    semantic: 'Foreign key to Architect (res.partner) - architect contact for the project',
+    required: false,
+    searchable: false,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Table 2 (res.partner - Contact/Company)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  {
+    table_number: 2,
+    column_number: 1,
     table: 'res.partner',
     field: 'name',
     type: 'char',
@@ -198,8 +384,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: true,
     searchable: true,
   },
-  C_2: {
-    code: 'C_2',
+  {
+    table_number: 2,
+    column_number: 2,
     table: 'res.partner',
     field: 'id',
     type: 'integer',
@@ -207,8 +394,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: true,
     searchable: false,
   },
-  C_10: {
-    code: 'C_10',
+  {
+    table_number: 2,
+    column_number: 10,
     table: 'res.partner',
     field: 'email',
     type: 'char',
@@ -216,8 +404,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: false,
     searchable: true,
   },
-  C_11: {
-    code: 'C_11',
+  {
+    table_number: 2,
+    column_number: 11,
     table: 'res.partner',
     field: 'phone',
     type: 'char',
@@ -227,11 +416,12 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // S_ (crm.stage - Pipeline Stage) - 2 fields
+  // Table 3 (crm.stage - Pipeline Stage)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  S_1: {
-    code: 'S_1',
+  {
+    table_number: 3,
+    column_number: 1,
     table: 'crm.stage',
     field: 'name',
     type: 'char',
@@ -239,8 +429,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: true,
     searchable: true,
   },
-  S_2: {
-    code: 'S_2',
+  {
+    table_number: 3,
+    column_number: 2,
     table: 'crm.stage',
     field: 'id',
     type: 'integer',
@@ -250,11 +441,12 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // U_ (res.users - User/Salesperson) - 2 fields
+  // Table 4 (res.users - User/Salesperson)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  U_1: {
-    code: 'U_1',
+  {
+    table_number: 4,
+    column_number: 1,
     table: 'res.users',
     field: 'name',
     type: 'char',
@@ -262,8 +454,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: false,
     searchable: true,
   },
-  U_2: {
-    code: 'U_2',
+  {
+    table_number: 4,
+    column_number: 2,
     table: 'res.users',
     field: 'id',
     type: 'integer',
@@ -273,11 +466,12 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // T_ (crm.team - Sales Team) - 2 fields
+  // Table 5 (crm.team - Sales Team)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  T_1: {
-    code: 'T_1',
+  {
+    table_number: 5,
+    column_number: 1,
     table: 'crm.team',
     field: 'name',
     type: 'char',
@@ -285,8 +479,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: false,
     searchable: true,
   },
-  T_2: {
-    code: 'T_2',
+  {
+    table_number: 5,
+    column_number: 2,
     table: 'crm.team',
     field: 'id',
     type: 'integer',
@@ -296,11 +491,12 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // ST_ (res.country.state - State/Territory) - 2 fields
+  // Table 6 (res.country.state - State/Territory)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  ST_1: {
-    code: 'ST_1',
+  {
+    table_number: 6,
+    column_number: 1,
     table: 'res.country.state',
     field: 'name',
     type: 'char',
@@ -308,8 +504,9 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: false,
     searchable: true,
   },
-  ST_2: {
-    code: 'ST_2',
+  {
+    table_number: 6,
+    column_number: 2,
     table: 'res.country.state',
     field: 'id',
     type: 'integer',
@@ -319,11 +516,12 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // LR_ (crm.lost.reason - Lost Reason) - 1 field
+  // Table 7 (crm.lost.reason - Lost Reason)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  LR_1: {
-    code: 'LR_1',
+  {
+    table_number: 7,
+    column_number: 1,
     table: 'crm.lost.reason',
     field: 'name',
     type: 'char',
@@ -331,23 +529,73 @@ export const SCHEMA_DEFINITIONS: Record<string, SchemaDefinition> = {
     required: false,
     searchable: true,
   },
-};
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Table 8 (x_specification - Specification)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  {
+    table_number: 8,
+    column_number: 1,
+    table: 'x_specification',
+    field: 'x_name',
+    type: 'char',
+    semantic: 'Specification name - type of project specification (e.g., Duracube, Open Spec, Closed Spec)',
+    required: false,
+    searchable: true,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Table 9 (x_lead_source - Lead Source)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  {
+    table_number: 9,
+    column_number: 1,
+    table: 'x_lead_source',
+    field: 'x_name',
+    type: 'char',
+    semantic: 'Lead source name - where the lead originated (e.g., Website, Referral, Trade Show, Cold Call)',
+    required: false,
+    searchable: true,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Table 10 (res.partner - Architect)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  {
+    table_number: 10,
+    column_number: 1,
+    table: 'res.partner',
+    field: 'name',
+    type: 'char',
+    semantic: 'Architect name - the architect or architecture firm associated with the project',
+    required: false,
+    searchable: true,
+  },
+];
 
 // Get all schema codes as array
-export const SCHEMA_CODES = Object.keys(SCHEMA_DEFINITIONS);
+export function getAllSchemaCodes(): string[] {
+  return SCHEMA_DEFINITIONS.map(def => getSchemaCode(def));
+}
 
-// Get schema codes by table
-export function getSchemaCodesByTable(table: string): string[] {
-  return Object.values(SCHEMA_DEFINITIONS)
-    .filter(def => def.table === table)
-    .map(def => def.code);
+// Get schema codes by table number
+export function getSchemaCodesByTable(tableNumber: number): string[] {
+  return SCHEMA_DEFINITIONS
+    .filter(def => def.table_number === tableNumber)
+    .map(def => getSchemaCode(def));
+}
+
+// Get searchable schema definitions
+export function getSearchableSchemas(): SchemaDefinition[] {
+  return SCHEMA_DEFINITIONS.filter(def => def.searchable);
 }
 
 // Get searchable schema codes
 export function getSearchableCodes(): string[] {
-  return Object.values(SCHEMA_DEFINITIONS)
-    .filter(def => def.searchable)
-    .map(def => def.code);
+  return getSearchableSchemas().map(def => getSchemaCode(def));
 }
 
 // =============================================================================
@@ -355,9 +603,10 @@ export function getSearchableCodes(): string[] {
 // =============================================================================
 
 export const ENCODING_CONFIG = {
-  FIELD_DELIMITER: '|',     // Separates fields: O_1*value|O_2*value
-  VALUE_DELIMITER: '*',     // Separates code from value: O_1*value
-  ESCAPE_CHARS: ['|', '*', '\\'],
+  FIELD_DELIMITER: '|',     // Separates fields: 1^1*value|1^10*value
+  VALUE_DELIMITER: '*',     // Separates code from value: 1^10*value
+  CODE_DELIMITER: '^',      // Separates table from column: 1^10
+  ESCAPE_CHARS: ['|', '*', '\\', '^'],
 } as const;
 
 // =============================================================================

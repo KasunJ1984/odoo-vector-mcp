@@ -5,10 +5,17 @@
  * This service enables AI Schema Discovery: Claude can semantically search for
  * field meanings without hardcoded lookups.
  *
- * Example: "find fields about revenue" → O_10 (expected_revenue)
+ * NEW FORMAT: {TABLE_NUMBER}^{COLUMN_NUMBER}
+ * Example: "find fields about revenue" → 1^10 (expected_revenue)
  */
 
-import { SCHEMA_DEFINITIONS, QDRANT_CONFIG } from '../constants.js';
+import {
+  SCHEMA_DEFINITIONS,
+  QDRANT_CONFIG,
+  getSchemaCode,
+  getSchemaByCode as getSchemaDefByCode,
+  TABLE_DISPLAY_NAMES,
+} from '../constants.js';
 import { embed, embedBatch, isEmbeddingServiceAvailable } from './embedding-service.js';
 import {
   collectionExists,
@@ -63,13 +70,13 @@ export async function initializeSchemaCollection(): Promise<{
     await createSchemaCollection();
   }
 
-  // Build schema vectors
-  const schemaCodes = Object.keys(SCHEMA_DEFINITIONS);
-  const schemaVectors: SchemaVector[] = schemaCodes.map(code => {
-    const def = SCHEMA_DEFINITIONS[code];
+  // Build schema vectors from the array of definitions
+  const schemaVectors: SchemaVector[] = SCHEMA_DEFINITIONS.map(def => {
+    const code = getSchemaCode(def);
     return {
       id: code,
-      code: code,
+      table_number: def.table_number,
+      column_number: def.column_number,
       table: def.table,
       field: def.field,
       type: def.type,
@@ -78,10 +85,11 @@ export async function initializeSchemaCollection(): Promise<{
   });
 
   // Build semantic texts for embedding
-  // Format: "CODE from TABLE field FIELD: SEMANTIC_DESCRIPTION"
-  const semanticTexts = schemaVectors.map(sv =>
-    `${sv.code} from ${sv.table} field ${sv.field}: ${sv.semantic}`
-  );
+  // Format: "CODE (TABLE_NAME) from TABLE field FIELD: SEMANTIC_DESCRIPTION"
+  const semanticTexts = schemaVectors.map(sv => {
+    const tableName = TABLE_DISPLAY_NAMES[sv.table_number] || sv.table;
+    return `${sv.id} (${tableName}) from ${sv.table} field ${sv.field}: ${sv.semantic}`;
+  });
 
   console.error(`[Schema] Generating embeddings for ${semanticTexts.length} schema definitions...`);
 
@@ -92,7 +100,7 @@ export async function initializeSchemaCollection(): Promise<{
 
   // Prepare points for upsert
   const points = schemaVectors.map((sv, idx) => ({
-    id: sv.code,
+    id: sv.id,
     vector: embeddings[idx],
     payload: sv,
   }));
@@ -120,9 +128,9 @@ export async function initializeSchemaCollection(): Promise<{
  * by asking natural language questions.
  *
  * Examples:
- * - "fields about revenue or money" → O_10 (expected_revenue)
- * - "contact information" → C_10 (email), C_11 (phone)
- * - "pipeline stage" → S_1 (stage name)
+ * - "fields about revenue or money" → 1^10 (expected_revenue)
+ * - "contact information" → 2^10 (email), 2^11 (phone)
+ * - "pipeline stage" → 3^1 (stage name)
  *
  * @param query Natural language query
  * @param options Search options
@@ -132,9 +140,10 @@ export async function searchSchema(
   options: {
     limit?: number;
     tableFilter?: string;  // Filter to specific table like "crm.lead"
+    tableNumberFilter?: number;  // Filter by table number (NEW)
   } = {}
 ): Promise<SchemaSearchResult[]> {
-  const { limit = 10, tableFilter } = options;
+  const { limit = 10, tableFilter, tableNumberFilter } = options;
 
   // Check if embedding service is available
   if (!isEmbeddingServiceAvailable()) {
@@ -145,11 +154,13 @@ export async function searchSchema(
   const queryVector = await embed(query, 'query');
 
   // Search schema collection
-  const results = await searchSchemaCollection(queryVector, limit, tableFilter);
+  const results = await searchSchemaCollection(queryVector, limit, tableFilter, tableNumberFilter);
 
-  // Map to SchemaSearchResult
+  // Map to SchemaSearchResult with table_number and column_number
   return results.map(r => ({
-    code: r.payload.code,
+    code: r.payload.id,
+    table_number: r.payload.table_number,
+    column_number: r.payload.column_number,
     table: r.payload.table,
     field: r.payload.field,
     type: r.payload.type,
@@ -163,15 +174,17 @@ export async function searchSchema(
 // =============================================================================
 
 /**
- * Get schema definition by code
+ * Get schema definition by code string
+ * @param code Schema code like "1^10"
  */
 export function getSchemaByCode(code: string): SchemaVector | undefined {
-  const def = SCHEMA_DEFINITIONS[code];
+  const def = getSchemaDefByCode(code);
   if (!def) return undefined;
 
   return {
     id: code,
-    code: code,
+    table_number: def.table_number,
+    column_number: def.column_number,
     table: def.table,
     field: def.field,
     type: def.type,
@@ -180,33 +193,61 @@ export function getSchemaByCode(code: string): SchemaVector | undefined {
 }
 
 /**
- * Get all schema codes for a specific table
+ * Get all schema codes for a specific table number
+ */
+export function getSchemaByTableNumber(tableNumber: number): SchemaVector[] {
+  return SCHEMA_DEFINITIONS
+    .filter(def => def.table_number === tableNumber)
+    .map(def => {
+      const code = getSchemaCode(def);
+      return {
+        id: code,
+        table_number: def.table_number,
+        column_number: def.column_number,
+        table: def.table,
+        field: def.field,
+        type: def.type,
+        semantic: def.semantic,
+      };
+    });
+}
+
+/**
+ * Get all schema codes for a specific table name
  */
 export function getSchemaByTable(table: string): SchemaVector[] {
-  return Object.entries(SCHEMA_DEFINITIONS)
-    .filter(([_, def]) => def.table === table)
-    .map(([code, def]) => ({
-      id: code,
-      code: code,
-      table: def.table,
-      field: def.field,
-      type: def.type,
-      semantic: def.semantic,
-    }));
+  return SCHEMA_DEFINITIONS
+    .filter(def => def.table === table)
+    .map(def => {
+      const code = getSchemaCode(def);
+      return {
+        id: code,
+        table_number: def.table_number,
+        column_number: def.column_number,
+        table: def.table,
+        field: def.field,
+        type: def.type,
+        semantic: def.semantic,
+      };
+    });
 }
 
 /**
  * Get all schema definitions
  */
 export function getAllSchema(): SchemaVector[] {
-  return Object.entries(SCHEMA_DEFINITIONS).map(([code, def]) => ({
-    id: code,
-    code: code,
-    table: def.table,
-    field: def.field,
-    type: def.type,
-    semantic: def.semantic,
-  }));
+  return SCHEMA_DEFINITIONS.map(def => {
+    const code = getSchemaCode(def);
+    return {
+      id: code,
+      table_number: def.table_number,
+      column_number: def.column_number,
+      table: def.table,
+      field: def.field,
+      type: def.type,
+      semantic: def.semantic,
+    };
+  });
 }
 
 /**
@@ -221,6 +262,6 @@ export async function getSchemaStatus(): Promise<{
   return {
     exists: info.exists,
     vectorCount: info.vectorCount,
-    definitionCount: Object.keys(SCHEMA_DEFINITIONS).length,
+    definitionCount: SCHEMA_DEFINITIONS.length,
   };
 }

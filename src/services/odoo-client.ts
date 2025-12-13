@@ -3,6 +3,10 @@
  *
  * A streamlined Odoo client for the vector MCP prototype.
  * Focused on read operations needed for syncing CRM data.
+ *
+ * Fetches data from 10 tables:
+ * 1=Opportunity, 2=Contact, 3=Stage, 4=User, 5=Team,
+ * 6=State, 7=LostReason, 8=Specification, 9=LeadSource, 10=Architect
  */
 
 import xmlrpc from 'xmlrpc';
@@ -251,8 +255,15 @@ export function getOdooClient(): OdooClient {
 
 /**
  * Fields to fetch for CRM leads
+ *
+ * Includes all fields from 10 tables:
+ * - Core fields from crm.lead
+ * - FK relations to res.partner, crm.stage, res.users, crm.team, res.country.state
+ * - FK relations to crm.lost.reason
+ * - Custom FK relations to x_specification, x_lead_source, x_architect (res.partner)
  */
 export const LEAD_FIELDS = [
+  // Core crm.lead fields (Table 1)
   'id',
   'name',
   'expected_revenue',
@@ -264,12 +275,20 @@ export const LEAD_FIELDS = [
   'city',
   'x_sector',
   'active',
-  'partner_id',
-  'stage_id',
-  'user_id',
-  'team_id',
-  'state_id',
-  'lost_reason_id',
+  'is_won',
+
+  // Standard FK relations (Tables 2-7)
+  'partner_id',      // Table 2: res.partner (Contact)
+  'stage_id',        // Table 3: crm.stage (Stage)
+  'user_id',         // Table 4: res.users (User)
+  'team_id',         // Table 5: crm.team (Team)
+  'state_id',        // Table 6: res.country.state (State)
+  'lost_reason_id',  // Table 7: crm.lost.reason (Lost Reason)
+
+  // Custom FK relations (Tables 8-10)
+  'x_specification_id',  // Table 8: x_specification (Specification)
+  'x_lead_source_id',    // Table 9: x_lead_source (Lead Source)
+  'x_architect_id',      // Table 10: res.partner (Architect)
 ];
 
 /**

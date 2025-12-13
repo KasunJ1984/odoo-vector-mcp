@@ -4,10 +4,12 @@
  * Manages two Qdrant collections:
  * - crm_schema: Schema definitions with semantic embeddings
  * - crm_data: Opportunity records with encoded strings
+ *
+ * NEW FORMAT: Uses numeric table^column codes (e.g., 1^10)
  */
 
 import { QdrantClient } from '@qdrant/js-client-rest';
-import { QDRANT_CONFIG, SIMILARITY_THRESHOLDS } from '../constants.js';
+import { QDRANT_CONFIG, SIMILARITY_THRESHOLDS, ENCODING_CONFIG } from '../constants.js';
 import type { VectorFilter, VectorSearchResult, OpportunityPayload, SchemaVector } from '../types.js';
 
 // =============================================================================
@@ -99,8 +101,15 @@ export async function createSchemaCollection(): Promise<boolean> {
     field_schema: 'keyword',
   });
 
+  // Index for table_number (NEW)
   await qdrantClient.createPayloadIndex(QDRANT_CONFIG.SCHEMA_COLLECTION, {
-    field_name: 'code',
+    field_name: 'table_number',
+    field_schema: 'integer',
+  });
+
+  // Index for id (schema code like "1^10")
+  await qdrantClient.createPayloadIndex(QDRANT_CONFIG.SCHEMA_COLLECTION, {
+    field_name: 'id',
     field_schema: 'keyword',
   });
 
@@ -129,6 +138,7 @@ export async function createDataCollection(): Promise<boolean> {
 
   // Create payload indexes for filtering
   const indexFields = [
+    // Core indexes
     { field: 'stage_id', type: 'integer' as const },
     { field: 'user_id', type: 'integer' as const },
     { field: 'team_id', type: 'integer' as const },
@@ -138,6 +148,14 @@ export async function createDataCollection(): Promise<boolean> {
     { field: 'is_active', type: 'bool' as const },
     { field: 'sector', type: 'keyword' as const },
     { field: 'entity_type', type: 'keyword' as const },
+    // New indexes for tables 8-10
+    { field: 'specification_id', type: 'integer' as const },
+    { field: 'lead_source_id', type: 'integer' as const },
+    { field: 'architect_id', type: 'integer' as const },
+    // Text indexes for names
+    { field: 'opportunity_name', type: 'keyword' as const },
+    { field: 'contact_name', type: 'keyword' as const },
+    { field: 'stage_name', type: 'keyword' as const },
   ];
 
   for (const { field, type } of indexFields) {
@@ -184,7 +202,7 @@ export async function getCollectionInfo(collectionName: string): Promise<{
  */
 export async function upsertSchemaPoints(
   points: Array<{
-    id: string;  // Schema code like "O_1"
+    id: string;  // Schema code like "1^10"
     vector: number[];
     payload: SchemaVector;
   }>
@@ -206,17 +224,32 @@ export async function upsertSchemaPoints(
 
 /**
  * Search schema collection by vector
+ *
+ * @param vector Query vector
+ * @param limit Max results
+ * @param tableFilter Filter by table name (e.g., "crm.lead")
+ * @param tableNumberFilter Filter by table number (e.g., 1)
  */
 export async function searchSchemaCollection(
   vector: number[],
   limit: number = 10,
-  tableFilter?: string
+  tableFilter?: string,
+  tableNumberFilter?: number
 ): Promise<Array<{ code: string; score: number; payload: SchemaVector }>> {
   if (!qdrantClient) throw new Error('Vector client not initialized');
 
-  const filter = tableFilter
-    ? { must: [{ key: 'table', match: { value: tableFilter } }] }
-    : undefined;
+  // Build filter conditions
+  const mustConditions: object[] = [];
+
+  if (tableFilter) {
+    mustConditions.push({ key: 'table', match: { value: tableFilter } });
+  }
+
+  if (tableNumberFilter !== undefined) {
+    mustConditions.push({ key: 'table_number', match: { value: tableNumberFilter } });
+  }
+
+  const filter = mustConditions.length > 0 ? { must: mustConditions } : undefined;
 
   const results = await qdrantClient.search(QDRANT_CONFIG.SCHEMA_COLLECTION, {
     vector,
@@ -226,7 +259,7 @@ export async function searchSchemaCollection(
   });
 
   return results.map(r => ({
-    code: (r.payload as Record<string, unknown>).code as string,
+    code: (r.payload as Record<string, unknown>).id as string,
     score: r.score,
     payload: r.payload as unknown as SchemaVector,
   }));
@@ -312,24 +345,28 @@ export async function clearDataCollection(): Promise<void> {
 
 /**
  * Convert schema code to numeric ID for Qdrant
+ *
+ * NEW FORMAT: "1^10" → (table * 1000) + column
+ * Example: "1^10" → 1010, "2^1" → 2001
  */
 function hashSchemaCode(code: string): number {
-  // Simple hash: prefix_number mapping
-  const prefixMap: Record<string, number> = {
-    'O': 1000,
-    'C': 2000,
-    'S': 3000,
-    'U': 4000,
-    'T': 5000,
-    'ST': 6000,
-    'LR': 7000,
-  };
+  const caretIndex = code.indexOf(ENCODING_CONFIG.CODE_DELIMITER);
+  if (caretIndex === -1) {
+    // Fallback: try to parse the whole thing as a number
+    const num = parseInt(code, 10);
+    return isNaN(num) ? 0 : num;
+  }
 
-  const parts = code.split('_');
-  const prefix = parts[0];
-  const num = parseInt(parts[1], 10) || 0;
+  const tableNumber = parseInt(code.substring(0, caretIndex), 10);
+  const columnNumber = parseInt(code.substring(caretIndex + 1), 10);
 
-  return (prefixMap[prefix] || 0) + num;
+  if (isNaN(tableNumber) || isNaN(columnNumber)) {
+    return 0;
+  }
+
+  // Hash: table * 1000 + column
+  // This gives unique IDs for all combinations (up to 999 columns per table)
+  return (tableNumber * 1000) + columnNumber;
 }
 
 /**
@@ -338,6 +375,7 @@ function hashSchemaCode(code: string): number {
 function buildQdrantFilter(filter: VectorFilter): { must: object[] } {
   const must: object[] = [];
 
+  // Core filters
   if (filter.stage_id !== undefined) {
     if (typeof filter.stage_id === 'number') {
       must.push({ key: 'stage_id', match: { value: filter.stage_id } });
@@ -379,6 +417,19 @@ function buildQdrantFilter(filter: VectorFilter): { must: object[] } {
     if (filter.expected_revenue.$gte !== undefined) range.gte = filter.expected_revenue.$gte;
     if (filter.expected_revenue.$lte !== undefined) range.lte = filter.expected_revenue.$lte;
     must.push({ key: 'expected_revenue', range });
+  }
+
+  // New filters for tables 8-10
+  if (filter.specification_id !== undefined) {
+    must.push({ key: 'specification_id', match: { value: filter.specification_id } });
+  }
+
+  if (filter.lead_source_id !== undefined) {
+    must.push({ key: 'lead_source_id', match: { value: filter.lead_source_id } });
+  }
+
+  if (filter.architect_id !== undefined) {
+    must.push({ key: 'architect_id', match: { value: filter.architect_id } });
   }
 
   return { must };
