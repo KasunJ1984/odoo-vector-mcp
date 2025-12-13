@@ -22,14 +22,14 @@ export const QDRANT_CONFIG = {
   API_KEY: process.env.QDRANT_API_KEY || '',
   SCHEMA_COLLECTION: process.env.SCHEMA_COLLECTION_NAME || 'crm_schema',
   DATA_COLLECTION: process.env.DATA_COLLECTION_NAME || 'crm_data',
-  VECTOR_SIZE: 512,
+  VECTOR_SIZE: parseInt(process.env.EMBEDDING_DIMENSIONS || '1024', 10),
   DISTANCE_METRIC: 'Cosine' as const,
 } as const;
 
 export const VOYAGE_CONFIG = {
   API_KEY: process.env.VOYAGE_API_KEY || '',
-  MODEL: process.env.EMBEDDING_MODEL || 'voyage-3-lite',
-  DIMENSIONS: 512,
+  MODEL: process.env.EMBEDDING_MODEL || 'voyage-3',
+  DIMENSIONS: parseInt(process.env.EMBEDDING_DIMENSIONS || '1024', 10),
   MAX_BATCH_SIZE: 128,
   INPUT_TYPE_DOCUMENT: 'document' as const,
   INPUT_TYPE_QUERY: 'query' as const,
