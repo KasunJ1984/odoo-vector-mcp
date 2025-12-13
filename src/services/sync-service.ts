@@ -320,7 +320,7 @@ function buildPayload(lead: CrmLead, encodedString: string, semanticText: string
     team_id: getRelationId(lead.team_id),
     expected_revenue: lead.expected_revenue,
     probability: lead.probability,
-    is_won: lead.is_won === true,
+    is_won: lead.probability === 100,  // Derived from probability (Odoo sets 100% for won)
     is_lost: isLost,
     is_active: lead.active !== false,
     city: typeof lead.city === 'string' ? lead.city : undefined,

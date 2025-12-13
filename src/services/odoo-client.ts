@@ -274,7 +274,6 @@ export const LEAD_FIELDS = [
   'date_closed',
   'city',
   'active',
-  'is_won',
 
   // Standard FK relations (Tables 2-7)
   'partner_id',      // Table 2: res.partner (Contact)

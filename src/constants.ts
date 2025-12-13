@@ -254,16 +254,6 @@ export const SCHEMA_DEFINITIONS: SchemaDefinition[] = [
     required: false,
     searchable: false,
   },
-  {
-    table_number: 1,
-    column_number: 41,
-    table: 'crm.lead',
-    field: 'is_won',
-    type: 'boolean',
-    semantic: 'Whether the opportunity has been won (true) or not (false)',
-    required: false,
-    searchable: true,
-  },
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Table 1 (crm.lead) - Foreign Key IDs (90-99)

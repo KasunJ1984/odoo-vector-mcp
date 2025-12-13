@@ -73,7 +73,7 @@ export function encodeOpportunity(lead: CrmLead): string {
   addField(1, 25, cleanDescription(lead.description)); // description
   addField(1, 30, lead.city);                          // city
   addField(1, 40, lead.active);                        // active
-  addField(1, 41, lead.is_won);                        // is_won
+  addField(1, 41, lead.probability === 100);           // is_won (derived from probability)
 
   // Foreign key IDs (columns 90-99)
   addField(1, 90, getRelId(lead.partner_id));          // partner_id FK
@@ -240,8 +240,8 @@ export function buildSemanticText(lead: CrmLead): string {
     parts.push(`Stage: ${getRelName(lead.stage_id)}`);
   }
 
-  // Won/Lost status
-  if (lead.is_won === true) {
+  // Won/Lost status (derived from probability)
+  if (lead.probability === 100) {
     parts.push('Status: Won');
   } else if (isValidRelation(lead.lost_reason_id)) {
     parts.push(`Lost Reason: ${getRelName(lead.lost_reason_id)}`);

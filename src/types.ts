@@ -64,7 +64,6 @@ export interface CrmLead {
   date_closed?: string | false;
   city?: string | false;
   active?: boolean;
-  is_won?: boolean;
 
   // Standard relation fields (many2one)
   partner_id?: OdooRelation;        // Table 2: res.partner (Contact)
