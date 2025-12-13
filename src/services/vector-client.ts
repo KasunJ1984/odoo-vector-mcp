@@ -146,7 +146,6 @@ export async function createDataCollection(): Promise<boolean> {
     { field: 'is_won', type: 'bool' as const },
     { field: 'is_lost', type: 'bool' as const },
     { field: 'is_active', type: 'bool' as const },
-    { field: 'sector', type: 'keyword' as const },
     { field: 'entity_type', type: 'keyword' as const },
     // New indexes for tables 8-10
     { field: 'specification_id', type: 'integer' as const },
@@ -406,10 +405,6 @@ function buildQdrantFilter(filter: VectorFilter): { must: object[] } {
 
   if (filter.is_active !== undefined) {
     must.push({ key: 'is_active', match: { value: filter.is_active } });
-  }
-
-  if (filter.sector !== undefined) {
-    must.push({ key: 'sector', match: { value: filter.sector } });
   }
 
   if (filter.expected_revenue !== undefined) {

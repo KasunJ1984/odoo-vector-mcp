@@ -63,7 +63,6 @@ export interface CrmLead {
   write_date?: string;
   date_closed?: string | false;
   city?: string | false;
-  x_sector?: string | false;
   active?: boolean;
   is_won?: boolean;
 
@@ -196,7 +195,6 @@ export interface OpportunityPayload {
   is_won?: boolean;
   is_lost?: boolean;
   is_active?: boolean;
-  sector?: string;
   city?: string;
   state_name?: string;
   create_date?: string;
@@ -252,7 +250,6 @@ export interface VectorFilter {
   is_won?: boolean;
   is_lost?: boolean;
   is_active?: boolean;
-  sector?: string;
   expected_revenue?: { $gte?: number; $lte?: number };
   create_date?: { $gte?: string; $lte?: string };
 

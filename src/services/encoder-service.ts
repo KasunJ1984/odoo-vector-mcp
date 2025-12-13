@@ -74,7 +74,6 @@ export function encodeOpportunity(lead: CrmLead): string {
   addField(1, 30, lead.city);                          // city
   addField(1, 40, lead.active);                        // active
   addField(1, 41, lead.is_won);                        // is_won
-  addField(1, 50, lead.x_sector);                      // x_sector
 
   // Foreign key IDs (columns 90-99)
   addField(1, 90, getRelId(lead.partner_id));          // partner_id FK
@@ -260,11 +259,6 @@ export function buildSemanticText(lead: CrmLead): string {
   // Probability
   if (lead.probability !== undefined && lead.probability !== null) {
     parts.push(`Probability: ${lead.probability}%`);
-  }
-
-  // Sector
-  if (lead.x_sector && typeof lead.x_sector === 'string') {
-    parts.push(`Sector: ${lead.x_sector}`);
   }
 
   // Location

@@ -273,7 +273,6 @@ export const LEAD_FIELDS = [
   'write_date',
   'date_closed',
   'city',
-  'x_sector',
   'active',
   'is_won',
 

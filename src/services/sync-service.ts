@@ -323,7 +323,6 @@ function buildPayload(lead: CrmLead, encodedString: string, semanticText: string
     is_won: lead.is_won === true,
     is_lost: isLost,
     is_active: lead.active !== false,
-    sector: typeof lead.x_sector === 'string' ? lead.x_sector : undefined,
     city: typeof lead.city === 'string' ? lead.city : undefined,
     state_name: getRelationName(lead.state_id) || undefined,
     create_date: lead.create_date,

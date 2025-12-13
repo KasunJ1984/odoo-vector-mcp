@@ -82,9 +82,6 @@ export const SemanticSearchSchema = z.object({
 
   max_revenue: z.number().min(0).optional()
     .describe('Maximum expected revenue'),
-
-  sector: z.string().optional()
-    .describe('Filter by sector (Education, Healthcare, Commercial, etc.)'),
 }).strict();
 
 export type SemanticSearchInput = z.infer<typeof SemanticSearchSchema>;

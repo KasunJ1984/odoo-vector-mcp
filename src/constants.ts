@@ -264,16 +264,6 @@ export const SCHEMA_DEFINITIONS: SchemaDefinition[] = [
     required: false,
     searchable: true,
   },
-  {
-    table_number: 1,
-    column_number: 50,
-    table: 'crm.lead',
-    field: 'x_sector',
-    type: 'selection',
-    semantic: 'Industry sector classification - Education, Healthcare, Commercial, Residential, Government',
-    required: false,
-    searchable: true,
-  },
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Table 1 (crm.lead) - Foreign Key IDs (90-99)

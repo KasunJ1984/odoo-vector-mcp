@@ -128,7 +128,7 @@ Returns opportunities with their encoded field data (use vector_decode to interp
 Examples:
 - "hospital projects in Victoria"
 - "large commercial deals we lost to competitors"
-- "education sector opportunities over $100k"
+- "opportunities over $100k"
 - "opportunities managed by John Smith"
 
 Results include:
@@ -150,7 +150,6 @@ Results include:
         if (input.user_id) filter.user_id = input.user_id;
         if (input.is_won !== undefined) filter.is_won = input.is_won;
         if (input.is_lost !== undefined) filter.is_lost = input.is_lost;
-        if (input.sector) filter.sector = input.sector;
         if (input.min_revenue || input.max_revenue) {
           filter.expected_revenue = {};
           if (input.min_revenue) filter.expected_revenue.$gte = input.min_revenue;
@@ -198,9 +197,6 @@ Results include:
           }
           if (p.stage_name) {
             lines.push(`- **Stage**: ${p.stage_name}`);
-          }
-          if (p.sector) {
-            lines.push(`- **Sector**: ${p.sector}`);
           }
           if (p.city || p.state_name) {
             lines.push(`- **Location**: ${[p.city, p.state_name].filter(Boolean).join(', ')}`);
