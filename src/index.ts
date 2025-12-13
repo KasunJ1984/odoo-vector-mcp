@@ -77,17 +77,17 @@ async function runHttp(): Promise<void> {
     });
   });
 
-  // SSE endpoint for MCP communication
-  app.get('/sse', async (req: Request, res: Response) => {
-    console.error('[HTTP] New SSE connection');
+  // MCP endpoint for SSE communication (matches /mcp pattern)
+  app.get('/mcp', async (req: Request, res: Response) => {
+    console.error('[HTTP] New MCP SSE connection');
 
-    const transport = new SSEServerTransport('/message', res);
+    const transport = new SSEServerTransport('/mcp/message', res);
     const sessionId = Date.now().toString();
     transports.set(sessionId, transport);
 
     // Handle client disconnect
     req.on('close', () => {
-      console.error('[HTTP] SSE connection closed');
+      console.error('[HTTP] MCP SSE connection closed');
       transports.delete(sessionId);
     });
 
@@ -96,7 +96,7 @@ async function runHttp(): Promise<void> {
   });
 
   // Message endpoint for client-to-server communication
-  app.post('/message', express.json(), async (req: Request, res: Response) => {
+  app.post('/mcp/message', express.json(), async (req: Request, res: Response) => {
     // Find the active transport and forward the message
     const transportsArray = Array.from(transports.values());
     if (transportsArray.length > 0) {
@@ -113,9 +113,9 @@ async function runHttp(): Promise<void> {
   app.listen(PORT, HOST, () => {
     console.error(`odoo-vector-mcp running on http://${HOST}:${PORT}`);
     console.error('Endpoints:');
-    console.error(`  GET  /health  - Health check`);
-    console.error(`  GET  /sse     - SSE connection for MCP`);
-    console.error(`  POST /message - Message handler`);
+    console.error(`  GET  /health      - Health check`);
+    console.error(`  GET  /mcp         - SSE connection for MCP`);
+    console.error(`  POST /mcp/message - Message handler`);
   });
 }
 
