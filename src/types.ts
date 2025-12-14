@@ -1,12 +1,13 @@
 /**
  * TypeScript type definitions for odoo-vector-mcp
  *
- * Updated for numeric table-prefixed encoding system:
- * Format: {TABLE_NUMBER}^{COLUMN_NUMBER}*{VALUE}
+ * Redesigned for comprehensive Odoo schema search using 4^XX* encoding format.
+ * Phase 1: Schema semantic search
+ * Phase 2: Will add data extraction using Odoo client
  */
 
 // =============================================================================
-// ODOO TYPES
+// ODOO TYPES (KEPT FOR PHASE 2)
 // =============================================================================
 
 /**
@@ -46,128 +47,121 @@ export function getRelationId(relation: OdooRelation | undefined): number | unde
 }
 
 /**
- * CRM Lead (Opportunity) from Odoo
+ * CRM Lead record from Odoo (KEPT FOR PHASE 2)
  *
- * Includes all fields from 10 tables:
- * - Table 1: crm.lead (core opportunity data)
- * - Tables 2-10: Related entities via foreign keys
+ * This type represents a crm.lead record with all its relational fields.
+ * Used by odoo-client.ts for fetching lead data.
  */
 export interface CrmLead {
-  // Table 1 - Core fields
   id: number;
-  name: string;
-  expected_revenue?: number;
-  probability?: number;
-  description?: string | false;
-  create_date: string;
-  write_date?: string;
-  date_closed?: string | false;
-  city?: string | false;
-  active?: boolean;
+  name: string | false;
+  expected_revenue: number;
+  probability: number;
+  description: string | false;
+  create_date: string | false;
+  write_date: string | false;
+  date_closed: string | false;
+  city: string | false;
+  active: boolean;
 
-  // Standard relation fields (many2one)
-  partner_id?: OdooRelation;        // Table 2: res.partner (Contact)
-  stage_id?: OdooRelation;          // Table 3: crm.stage (Stage)
-  user_id?: OdooRelation;           // Table 4: res.users (User)
-  team_id?: OdooRelation;           // Table 5: crm.team (Team)
-  state_id?: OdooRelation;          // Table 6: res.country.state (State)
-  lost_reason_id?: OdooRelation;    // Table 7: crm.lost.reason (Lost Reason)
+  // Standard FK relations (return [id, name] or false)
+  partner_id: OdooRelation;
+  stage_id: OdooRelation;
+  user_id: OdooRelation;
+  team_id: OdooRelation;
+  state_id: OdooRelation;
+  lost_reason_id: OdooRelation;
 
-  // Custom relation fields (many2one)
-  x_specification_id?: OdooRelation; // Table 8: x_specification (Specification)
-  x_lead_source_id?: OdooRelation;   // Table 9: x_lead_source (Lead Source)
-  x_architect_id?: OdooRelation;     // Table 10: res.partner (Architect)
-}
-
-/**
- * CRM Stage from Odoo
- */
-export interface CrmStage {
-  id: number;
-  name: string;
-  is_won?: boolean;
-  sequence?: number;
+  // Custom FK relations
+  x_specification_id: OdooRelation;
+  x_lead_source_id: OdooRelation;
+  x_architect_id: OdooRelation;
 }
 
 // =============================================================================
-// SCHEMA TYPES
+// ODOO SCHEMA TYPES (NEW - 4^XX* FORMAT)
 // =============================================================================
 
 /**
- * Schema vector stored in crm_schema collection
+ * Parsed Odoo schema row from the 4^XX* encoded format
  *
- * Uses numeric code format: {TABLE_NUMBER}^{COLUMN_NUMBER}
- * Example: "1^10" for crm.lead.expected_revenue
+ * Each row describes one field from ir.model.fields with relationship tracing.
+ *
+ * Source format:
+ * 4^58*[Model_ID]|4^58*[Field_ID]|4^26*[Field_Name]|4^33*[Field_Label]|
+ * 4^35*[Field_Type]|4^28*[Model_Name]|4^60000*[Primary_Location]|
+ * 4^57*[Stored]|4^60001*[PrimaryModelID^PrimaryFieldID]*
+ *
+ * Example:
+ * 4^58*292|4^58*28105|4^26*account_type|4^33*Type|4^35*selection|
+ * 4^28*account.account|4^60000*account.account.account_type|4^57*Yes|4^60001*292^28105*
  */
-export interface SchemaVector {
-  id: string;              // Schema code: "1^1", "2^10", etc.
-  table_number: number;    // Table identifier: 1, 2, 3...
-  column_number: number;   // Column identifier: 1, 10, 20...
-  table: string;           // Odoo table: "crm.lead"
-  field: string;           // Odoo field: "name"
-  type: string;            // Data type: "char", "integer", etc.
-  semantic: string;        // Human-readable description
+export interface OdooSchemaRow {
+  // IDs from ir.model and ir.model.fields
+  model_id: number;           // 4^58* - Model ID in ir.model
+  field_id: number;           // 4^58* - Field ID in ir.model.fields
+
+  // Field metadata
+  field_name: string;         // 4^26* - Technical name (e.g., "user_id")
+  field_label: string;        // 4^33* - Display label (e.g., "Salesperson")
+  field_type: string;         // 4^35* - Type (char, many2one, one2many, etc.)
+  model_name: string;         // 4^28* - Model name (e.g., "crm.lead")
+
+  // Primary data location (WHERE the data actually lives)
+  primary_data_location: string;  // 4^60000* - Location (e.g., "res.users.id")
+  stored: boolean;                // 4^57* - Is field stored in database?
+
+  // Primary data reference IDs
+  primary_model_id: number | string;  // 4^60001* before ^ - Model ID where data lives
+  primary_field_id: number | string;  // 4^60001* after ^ - Field ID where data lives
+
+  // Original encoded string for display
+  raw_encoded: string;
 }
 
 /**
  * Schema search result with similarity score
  */
 export interface SchemaSearchResult {
-  code: string;            // "1^10"
-  table_number: number;    // 1
-  column_number: number;   // 10
-  table: string;
-  field: string;
-  type: string;
-  semantic: string;
-  score: number;           // Similarity score (0-1)
-}
-
-// =============================================================================
-// ENCODING TYPES
-// =============================================================================
-
-/**
- * Single decoded field from an encoded string
- *
- * Example: From "1^10*450000", produces:
- * {
- *   code: "1^10",
- *   table_number: 1,
- *   column_number: 10,
- *   value: "450000",
- *   table: "crm.lead",
- *   field: "expected_revenue",
- *   type: "float",
- *   parsedValue: 450000
- * }
- */
-export interface DecodedField {
-  code: string;            // "1^10"
-  table_number: number;    // 1
-  column_number: number;   // 10
-  value: string;           // Raw value from encoded string
-  table: string;           // "crm.lead"
-  field: string;           // "expected_revenue"
-  type: string;            // "float"
-  parsedValue: unknown;    // Type-converted value
+  score: number;              // Similarity score (0-1)
+  schema: OdooSchemaRow;      // The matched schema row
 }
 
 /**
- * Fully decoded record with organization by table number
- *
- * Example _by_table structure:
- * {
- *   1: { name: "Hospital Project", expected_revenue: 450000, ... },
- *   2: { name: "Hansen Yuncken" },
- *   3: { name: "Tender RFQ" }
- * }
+ * Filter for schema search
  */
-export interface DecodedRecord {
-  raw: string;             // Original encoded string
-  fields: DecodedField[];  // All decoded fields
-  _schema_codes: string[]; // List of schema codes found: ["1^1", "1^10", "2^1"]
-  _by_table: Record<number, Record<string, unknown>>;  // Organized by table NUMBER
+export interface SchemaFilter {
+  model_name?: string;        // Filter by model (e.g., "crm.lead")
+  field_type?: string;        // Filter by type (e.g., "many2one")
+  stored_only?: boolean;      // Only stored fields
+}
+
+/**
+ * Schema payload stored in Qdrant vector
+ */
+export interface SchemaPayload {
+  // Core identifiers
+  model_id: number;
+  field_id: number;
+  model_name: string;
+  field_name: string;
+  field_label: string;
+  field_type: string;
+
+  // Data location
+  primary_data_location: string;
+  primary_model_id: string;
+  primary_field_id: string;
+  stored: boolean;
+
+  // The semantic text that was embedded
+  semantic_text: string;
+
+  // Original encoded string
+  raw_encoded: string;
+
+  // Sync metadata
+  sync_timestamp: string;
 }
 
 // =============================================================================
@@ -175,87 +169,21 @@ export interface DecodedRecord {
 // =============================================================================
 
 /**
- * Payload stored with each opportunity vector in crm_data
- *
- * Contains indexed fields for efficient filtering plus encoded string
+ * Schema point for upserting to Qdrant
  */
-export interface OpportunityPayload {
-  odoo_id: number;
-  entity_type: 'opportunity';
-  encoded_string: string;
-  semantic_text: string;
-
-  // Core indexed fields for filtering
-  stage_id?: number;
-  user_id?: number;
-  team_id?: number;
-  expected_revenue?: number;
-  probability?: number;
-  is_won?: boolean;
-  is_lost?: boolean;
-  is_active?: boolean;
-  city?: string;
-  state_name?: string;
-  create_date?: string;
-
-  // New indexed fields (Tables 8-10)
-  specification_id?: number;
-  specification_name?: string;
-  lead_source_id?: number;
-  lead_source_name?: string;
-  architect_id?: number;
-  architect_name?: string;
-
-  // Semantic fields for rich display
-  opportunity_name?: string;
-  contact_name?: string;
-  stage_name?: string;
-  user_name?: string;
-  team_name?: string;
-  lost_reason_name?: string;
-
-  // Sync metadata
-  sync_timestamp: string;
+export interface SchemaPoint {
+  id: number;                 // Using field_id as unique identifier
+  vector: number[];           // Embedding vector
+  payload: SchemaPayload;     // Metadata
 }
 
 /**
- * Vector search result
+ * Vector search result from Qdrant
  */
 export interface VectorSearchResult {
   id: number;
   score: number;
-  payload: OpportunityPayload;
-}
-
-/**
- * Vector query options
- */
-export interface VectorQueryOptions {
-  vector: number[];
-  limit?: number;
-  minScore?: number;
-  filter?: VectorFilter;
-}
-
-/**
- * Vector filter for structured queries
- *
- * Supports filtering by indexed payload fields
- */
-export interface VectorFilter {
-  stage_id?: number | { $in: number[] };
-  user_id?: number | { $in: number[] };
-  team_id?: number;
-  is_won?: boolean;
-  is_lost?: boolean;
-  is_active?: boolean;
-  expected_revenue?: { $gte?: number; $lte?: number };
-  create_date?: { $gte?: string; $lte?: string };
-
-  // New filters for Tables 8-10
-  specification_id?: number;
-  lead_source_id?: number;
-  architect_id?: number;
+  payload: SchemaPayload;
 }
 
 // =============================================================================
@@ -263,33 +191,23 @@ export interface VectorFilter {
 // =============================================================================
 
 /**
- * Sync operation result
+ * Schema sync result
  */
-export interface SyncResult {
+export interface SchemaSyncResult {
   success: boolean;
-  recordsSynced: number;
-  recordsFailed: number;
+  uploaded: number;
+  failed: number;
   durationMs: number;
   errors?: string[];
 }
 
 /**
- * Sync progress callback
+ * Schema sync status
  */
-export interface SyncProgress {
-  phase: 'fetching' | 'encoding' | 'embedding' | 'upserting';
-  current: number;
-  total: number;
-  message?: string;
-}
-
-/**
- * Sync status
- */
-export interface SyncStatus {
+export interface SchemaSyncStatus {
+  collection: string;
+  vectorCount: number;
   lastSync: string | null;
-  totalRecords: number;
-  isRunning: boolean;
 }
 
 // =============================================================================

@@ -1,11 +1,14 @@
 /**
- * odoo-vector-mcp - Self-Describing Vector Database MCP Server
+ * odoo-vector-mcp - Odoo Schema Semantic Search MCP Server
  *
- * This MCP server implements a self-describing vector database architecture
- * for Odoo CRM data using source-table-prefixed encoding.
+ * Redesigned for comprehensive Odoo schema search using semantic embeddings.
+ * Searches 17,930 fields across 800+ models to find:
+ * - Where data is stored
+ * - Field relationships
+ * - Data types and locations
  *
- * Key Innovation: Schema codes like O_1, C_1, S_1 indicate which Odoo table
- * each field comes from, enabling AI to discover field meanings semantically.
+ * Phase 1: Schema semantic search
+ * Phase 2: Will add data extraction using Odoo client
  *
  * Supports two transport modes:
  * - stdio: For Desktop Claude & Claude Code
@@ -17,10 +20,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express, { Request, Response } from 'express';
-import { registerVectorTools } from './tools/vector-tools.js';
+import { registerSearchTools } from './tools/search-tool.js';
 import { initializeEmbeddingService } from './services/embedding-service.js';
 import { initializeVectorClient } from './services/vector-client.js';
-import { initializeSchemaCollection } from './services/schema-service.js';
 
 // =============================================================================
 // CONFIGURATION
@@ -36,11 +38,11 @@ const HOST = process.env.HOST || '0.0.0.0';
 
 const server = new McpServer({
   name: 'odoo-vector-mcp',
-  version: '0.1.0',
+  version: '0.2.0',
 });
 
-// Register all vector tools
-registerVectorTools(server);
+// Register search tools (semantic_search + sync)
+registerSearchTools(server);
 
 // =============================================================================
 // STDIO TRANSPORT (for Desktop Claude & Claude Code)
@@ -78,8 +80,9 @@ async function runHttp(): Promise<void> {
     res.json({
       status: 'ok',
       service: 'odoo-vector-mcp',
-      version: '0.1.0',
-      transport: 'http'
+      version: '0.2.0',
+      transport: 'http',
+      description: 'Odoo Schema Semantic Search'
     });
   });
 
@@ -116,6 +119,10 @@ async function runHttp(): Promise<void> {
     console.error('Endpoints:');
     console.error(`  GET  /health - Health check`);
     console.error(`  POST /mcp    - MCP endpoint`);
+    console.error('');
+    console.error('Tools available:');
+    console.error('  - semantic_search: Search Odoo schema semantically');
+    console.error('  - sync: Upload schema to vector database');
   });
 }
 
@@ -124,28 +131,27 @@ async function runHttp(): Promise<void> {
 // =============================================================================
 
 async function initializeServices(): Promise<void> {
+  console.error('[Init] Initializing services...');
+
   // 1. Initialize embedding service (Voyage AI)
   const embeddingReady = initializeEmbeddingService();
   if (!embeddingReady) {
     console.error('[Init] Warning: Embedding service not available. Set VOYAGE_API_KEY.');
+  } else {
+    console.error('[Init] Embedding service ready');
   }
 
   // 2. Initialize vector client (Qdrant)
   const vectorReady = initializeVectorClient();
   if (!vectorReady) {
     console.error('[Init] Warning: Vector client not available. Check QDRANT_HOST.');
-    return;
+  } else {
+    console.error('[Init] Vector client ready');
   }
 
-  // 3. Initialize schema collection (if embedding service is available)
-  if (embeddingReady) {
-    try {
-      const schemaResult = await initializeSchemaCollection();
-      console.error(`[Init] Schema: ${schemaResult.message}`);
-    } catch (error) {
-      console.error('[Init] Schema initialization error:', error instanceof Error ? error.message : error);
-    }
-  }
+  // Note: Schema collection is initialized via the 'sync' tool
+  // Use sync with action="full_sync" to upload schema data
+  console.error('[Init] Use sync tool with action="full_sync" to upload schema');
 }
 
 // =============================================================================
