@@ -2,7 +2,7 @@
  * Embedding Service
  *
  * Generates vector embeddings using Voyage AI.
- * Uses voyage-3-lite model (512 dimensions).
+ * Uses voyage-3 model (1024 dimensions).
  */
 
 import { VoyageAIClient } from 'voyageai';
