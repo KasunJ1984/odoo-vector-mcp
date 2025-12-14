@@ -64,8 +64,8 @@ export const SemanticSearchSchema = z.object({
     .number()
     .min(0)
     .max(1)
-    .default(0.5)
-    .describe('Minimum similarity score for semantic mode (0-1, default: 0.5)'),
+    .default(0.35)
+    .describe('Minimum similarity score for semantic mode (0-1, default: 0.35)'),
 
   /**
    * Filter by model name (e.g., "crm.lead")
