@@ -308,12 +308,14 @@ function buildQdrantFilter(filter: SchemaFilter): { must: object[] } {
     }
   }
 
-  // Prefix match for primary_data_location (used in references_in mode)
-  // e.g., "res.partner" matches "res.partner.id", "res.partner.name", etc.
+  // Exact match for primary_data_location (used in references_in mode)
+  // many2one fields store target as "model.id" format, so append ".id" to model name
+  // e.g., filter "res.partner" becomes match "res.partner.id"
   if (filter.primary_data_location_prefix) {
+    const targetLocation = filter.primary_data_location_prefix + '.id';
     must.push({
       key: 'primary_data_location',
-      match: { text: filter.primary_data_location_prefix },
+      match: { value: targetLocation },
     });
   }
 
