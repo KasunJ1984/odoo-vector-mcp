@@ -13,9 +13,9 @@ import { SemanticSearchSchema, SyncSchema } from '../schemas/index.js';
 import type { SemanticSearchInput, SyncInput } from '../schemas/index.js';
 import type { SchemaFilter, VectorSearchResult } from '../types.js';
 import { embed, isEmbeddingServiceAvailable } from '../services/embedding-service.js';
-import { searchSchemaCollection, isVectorClientAvailable, getCollectionInfo } from '../services/vector-client.js';
+import { searchSchemaCollection, scrollSchemaCollection, isVectorClientAvailable, getCollectionInfo } from '../services/vector-client.js';
 import { syncSchemaToQdrant, getSyncStatus } from '../services/schema-sync.js';
-import { getSchemaStats } from '../services/schema-loader.js';
+import { getSchemaStats, getAllModelNames } from '../services/schema-loader.js';
 import { QDRANT_CONFIG } from '../constants.js';
 
 // =============================================================================
@@ -32,30 +32,51 @@ export function registerSearchTools(server: McpServer): void {
 
   server.tool(
     'semantic_search',
-    `Search Odoo schema semantically to find fields, understand relationships, and discover where data is stored.
+    `Search Odoo schema (17,930 fields across 709 models) with semantic + coordinate understanding.
 
-This tool searches across 17,930 Odoo fields from 800+ models using semantic understanding.
+**COORDINATE SYSTEM (Memory Blocks):**
+The schema uses a coordinate encoding: \`4^XX*VALUE\`
+- \`4\` = ir.model.fields table (the schema)
+- \`58\` = model_id column
+- \`26\` = field name column
+- \`28\` = model name column
 
-**Use Cases:**
-- Find where specific data is stored: "Where is customer email?"
-- Discover related fields: "Fields related to revenue"
-- Understand relationships: "How is salesperson connected to leads?"
-- Filter by model: "All date fields in crm.lead"
-- Find by type: "many2one relationships in account.move"
+Example: \`4^58*292\` means "model_id = 292" which is account.account
+So ALL fields in account.account have model_id = 292
 
-**Response includes:**
-- Field name and human-readable label
-- Field type (char, many2one, one2many, etc.)
-- Model name (e.g., crm.lead, res.partner)
-- Primary data location (WHERE the data actually lives)
-- Model ID and Field ID for direct database access
-- Similarity score
+**SEARCH MODES:**
+1. \`semantic\` (default): Natural language vector search
+   - "Where is customer email?"
+   - "Fields related to revenue"
 
-**Examples:**
-- { "query": "customer email in leads" }
-- { "query": "salesperson user", "model_filter": "crm.lead" }
-- { "query": "invoice date fields", "type_filter": "date" }
-- { "query": "partner relationships", "stored_only": true }`,
+2. \`list\`: Get ALL fields in a model (filter-only, no similarity)
+   - "How many columns in account.account?" → Use list mode, count results
+   - { "query": "all", "model_filter": "account.account", "search_mode": "list" }
+
+3. \`references_out\`: Find fields that POINT TO other models (outgoing FKs)
+   - "What does crm.lead connect to?"
+   - Returns: partner_id→res.partner, user_id→res.users
+
+4. \`references_in\`: Find fields that POINT TO a model (incoming FKs)
+   - "What references res.partner?"
+   - Returns: crm.lead.partner_id, sale.order.partner_id
+
+**IMPORTANT DISTINCTION:**
+- "Fields IN account.account" = fields that BELONG to account.account model
+- "Fields that REFERENCE account.account" = many2one fields in OTHER models pointing to account.account
+
+**COORDINATE QUERIES:**
+- "How many columns in account.account?" → list mode, count results
+- "Fields where model_id=267" → list mode with model filter
+
+**MODEL ID REFERENCE (Common models):**
+- account.account = 292 | crm.lead = 267 | res.partner = 78 | res.users = 81
+
+**EXAMPLES:**
+- Semantic: { "query": "salesperson assignment" }
+- List all: { "query": "all", "model_filter": "crm.lead", "search_mode": "list", "limit": 150 }
+- Outgoing: { "query": "links", "model_filter": "crm.lead", "search_mode": "references_out" }
+- Incoming: { "query": "refs", "model_filter": "res.partner", "search_mode": "references_in" }`,
     SemanticSearchSchema.shape,
     async (args) => {
       try {
@@ -67,15 +88,6 @@ This tool searches across 17,930 Odoo fields from 800+ models using semantic und
             content: [{
               type: 'text',
               text: '❌ Vector database not available. Check QDRANT_HOST configuration.',
-            }],
-          };
-        }
-
-        if (!isEmbeddingServiceAvailable()) {
-          return {
-            content: [{
-              type: 'text',
-              text: '❌ Embedding service not available. Check VOYAGE_API_KEY configuration.',
             }],
           };
         }
@@ -94,6 +106,128 @@ Use the sync tool with action: "full_sync"`,
           };
         }
 
+        // Validate model_filter if provided
+        if (input.model_filter) {
+          const validModels = getAllModelNames();
+          if (!validModels.includes(input.model_filter)) {
+            // Suggest similar models
+            const searchTerm = input.model_filter.toLowerCase();
+            const suggestions = validModels
+              .filter(m => m.toLowerCase().includes(searchTerm) ||
+                          searchTerm.split('.').some(part => m.toLowerCase().includes(part)))
+              .slice(0, 5);
+
+            return {
+              content: [{
+                type: 'text',
+                text: `❌ Model "${input.model_filter}" not found in schema.
+
+${suggestions.length > 0 ? `**Did you mean:**\n${suggestions.map(s => `- ${s}`).join('\n')}` : '**Tip:** Use semantic search without model_filter to discover available models.'}
+
+**Total models available:** ${validModels.length}`,
+              }],
+            };
+          }
+        }
+
+        // Route based on search_mode
+        let results: VectorSearchResult[];
+
+        // MODE: LIST - Get all fields in a model (filter-only, no vector similarity)
+        if (input.search_mode === 'list') {
+          if (!input.model_filter) {
+            return {
+              content: [{
+                type: 'text',
+                text: `❌ **list** mode requires model_filter parameter.
+
+**Example:**
+{ "query": "all", "model_filter": "crm.lead", "search_mode": "list" }`,
+              }],
+            };
+          }
+
+          const filter: SchemaFilter = { model_name: input.model_filter };
+          if (input.type_filter) filter.field_type = input.type_filter;
+          if (input.stored_only) filter.stored_only = true;
+
+          results = await scrollSchemaCollection({
+            filter,
+            limit: input.limit,
+          });
+
+          const output = formatListResults(input.model_filter, results, input.type_filter);
+          return { content: [{ type: 'text', text: output }] };
+        }
+
+        // MODE: REFERENCES_OUT - Find many2one/one2many/many2many fields IN target model
+        if (input.search_mode === 'references_out') {
+          if (!input.model_filter) {
+            return {
+              content: [{
+                type: 'text',
+                text: `❌ **references_out** mode requires model_filter parameter.
+
+**Example:**
+{ "query": "out", "model_filter": "crm.lead", "search_mode": "references_out" }`,
+              }],
+            };
+          }
+
+          const filter: SchemaFilter = {
+            model_name: input.model_filter,
+            field_type: ['many2one', 'one2many', 'many2many'],
+          };
+
+          results = await scrollSchemaCollection({
+            filter,
+            limit: input.limit,
+          });
+
+          const output = formatReferencesOutResults(input.model_filter, results);
+          return { content: [{ type: 'text', text: output }] };
+        }
+
+        // MODE: REFERENCES_IN - Find fields in OTHER models that point TO target model
+        if (input.search_mode === 'references_in') {
+          if (!input.model_filter) {
+            return {
+              content: [{
+                type: 'text',
+                text: `❌ **references_in** mode requires model_filter parameter.
+
+**Example:**
+{ "query": "in", "model_filter": "res.partner", "search_mode": "references_in" }`,
+              }],
+            };
+          }
+
+          // Filter where primary_data_location starts with target model
+          // e.g., primary_data_location = "res.partner.id" for many2one to res.partner
+          const filter: SchemaFilter = {
+            primary_data_location_prefix: input.model_filter,
+            field_type: 'many2one', // Only many2one stores FK to other model
+          };
+
+          results = await scrollSchemaCollection({
+            filter,
+            limit: input.limit,
+          });
+
+          const output = formatReferencesInResults(input.model_filter, results);
+          return { content: [{ type: 'text', text: output }] };
+        }
+
+        // MODE: SEMANTIC (default) - Vector similarity search
+        if (!isEmbeddingServiceAvailable()) {
+          return {
+            content: [{
+              type: 'text',
+              text: '❌ Embedding service not available. Check VOYAGE_API_KEY configuration.',
+            }],
+          };
+        }
+
         // Generate embedding for query
         const queryEmbedding = await embed(input.query, 'query');
 
@@ -104,7 +238,7 @@ Use the sync tool with action: "full_sync"`,
         if (input.stored_only) filter.stored_only = true;
 
         // Search
-        const results = await searchSchemaCollection(queryEmbedding, {
+        results = await searchSchemaCollection(queryEmbedding, {
           limit: input.limit,
           minScore: input.min_similarity,
           filter: Object.keys(filter).length > 0 ? filter : undefined,
@@ -119,7 +253,8 @@ Use the sync tool with action: "full_sync"`,
 Try:
 - Using different keywords
 - Lowering min_similarity (current: ${input.min_similarity})
-- Removing filters`,
+- Removing filters
+- Using **list** mode to see all fields in a model`,
             }],
           };
         }
@@ -270,7 +405,7 @@ ${result.errors?.slice(0, 5).join('\n') || 'None'}`,
 // =============================================================================
 
 /**
- * Format search results for display
+ * Format semantic search results for display
  */
 function formatSearchResults(
   query: string,
@@ -314,6 +449,171 @@ function formatSearchResults(
   // Add helpful tip at the end
   lines.push(`\n---`);
   lines.push(`💡 **Tip:** Use Model ID and Field ID to access data directly via Odoo API.`);
+
+  return lines.join('\n');
+}
+
+/**
+ * Format list mode results (all fields in a model)
+ */
+function formatListResults(
+  modelName: string,
+  results: VectorSearchResult[],
+  typeFilter?: string
+): string {
+  const lines: string[] = [];
+
+  // Summary header
+  lines.push(`## Fields in ${modelName}`);
+  lines.push(`**Total fields:** ${results.length}${typeFilter ? ` (filtered by type: ${typeFilter})` : ''}\n`);
+
+  // Group by field type for better overview
+  const byType: Record<string, VectorSearchResult[]> = {};
+  for (const r of results) {
+    const type = r.payload.field_type;
+    if (!byType[type]) byType[type] = [];
+    byType[type].push(r);
+  }
+
+  // Show type counts
+  lines.push(`**By Type:**`);
+  for (const [type, fields] of Object.entries(byType).sort((a, b) => b[1].length - a[1].length)) {
+    lines.push(`- ${type}: ${fields.length}`);
+  }
+  lines.push('');
+
+  // List fields organized by type
+  for (const [type, fields] of Object.entries(byType).sort((a, b) => a[0].localeCompare(b[0]))) {
+    lines.push(`### ${type} (${fields.length})`);
+
+    for (const { payload } of fields) {
+      const storedMark = payload.stored ? '' : ' *(computed)*';
+      lines.push(`- **${payload.field_name}** - ${payload.field_label}${storedMark}`);
+
+      // Show target for relational fields
+      if (type === 'many2one') {
+        const target = payload.primary_data_location.replace('.id', '');
+        lines.push(`  → ${target}`);
+      }
+    }
+    lines.push('');
+  }
+
+  // Model coordinate info
+  if (results.length > 0) {
+    const modelId = results[0].payload.model_id;
+    lines.push(`---`);
+    lines.push(`📍 **Model coordinate:** 4^58*${modelId} (model_id=${modelId})`);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Format references_out results (fields that POINT TO other models)
+ */
+function formatReferencesOutResults(
+  modelName: string,
+  results: VectorSearchResult[]
+): string {
+  const lines: string[] = [];
+
+  lines.push(`## Outgoing References from ${modelName}`);
+  lines.push(`**Total relational fields:** ${results.length}\n`);
+
+  // Group by relationship type
+  const byType: Record<string, VectorSearchResult[]> = {};
+  for (const r of results) {
+    const type = r.payload.field_type;
+    if (!byType[type]) byType[type] = [];
+    byType[type].push(r);
+  }
+
+  // Many2one = FK to another model
+  if (byType['many2one']?.length) {
+    lines.push(`### Many-to-One (Foreign Keys) - ${byType['many2one'].length}`);
+    lines.push(`*Fields that link to ONE record in another model*\n`);
+
+    for (const { payload } of byType['many2one']) {
+      const targetModel = payload.primary_data_location.replace('.id', '');
+      lines.push(`- **${payload.field_name}** (${payload.field_label})`);
+      lines.push(`  → Links to: **${targetModel}**`);
+    }
+    lines.push('');
+  }
+
+  // One2many = reverse relationship
+  if (byType['one2many']?.length) {
+    lines.push(`### One-to-Many - ${byType['one2many'].length}`);
+    lines.push(`*Fields that show MANY records from another model*\n`);
+
+    for (const { payload } of byType['one2many']) {
+      lines.push(`- **${payload.field_name}** (${payload.field_label})`);
+      lines.push(`  → Shows records from: ${payload.primary_data_location}`);
+    }
+    lines.push('');
+  }
+
+  // Many2many = bidirectional relationship
+  if (byType['many2many']?.length) {
+    lines.push(`### Many-to-Many - ${byType['many2many'].length}`);
+    lines.push(`*Fields with bidirectional many-to-many relationship*\n`);
+
+    for (const { payload } of byType['many2many']) {
+      lines.push(`- **${payload.field_name}** (${payload.field_label})`);
+      lines.push(`  → Related: ${payload.primary_data_location}`);
+    }
+    lines.push('');
+  }
+
+  if (results.length === 0) {
+    lines.push(`*No relational fields found in ${modelName}*`);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Format references_in results (fields in OTHER models that point TO target)
+ */
+function formatReferencesInResults(
+  targetModel: string,
+  results: VectorSearchResult[]
+): string {
+  const lines: string[] = [];
+
+  lines.push(`## Incoming References to ${targetModel}`);
+  lines.push(`**Models that link TO ${targetModel}:** ${results.length} fields\n`);
+
+  if (results.length === 0) {
+    lines.push(`*No incoming references found to ${targetModel}*`);
+    lines.push(`\n**Tip:** This model may not be referenced by other models, or may use a different naming pattern.`);
+    return lines.join('\n');
+  }
+
+  // Group by source model
+  const byModel: Record<string, VectorSearchResult[]> = {};
+  for (const r of results) {
+    const sourceModel = r.payload.model_name;
+    if (!byModel[sourceModel]) byModel[sourceModel] = [];
+    byModel[sourceModel].push(r);
+  }
+
+  lines.push(`**Referenced from ${Object.keys(byModel).length} models:**\n`);
+
+  for (const [sourceModel, fields] of Object.entries(byModel).sort((a, b) => b[1].length - a[1].length)) {
+    lines.push(`### ${sourceModel} (${fields.length} field${fields.length > 1 ? 's' : ''})`);
+
+    for (const { payload } of fields) {
+      lines.push(`- **${payload.field_name}** (${payload.field_label})`);
+      lines.push(`  → many2one FK to ${targetModel}`);
+    }
+    lines.push('');
+  }
+
+  lines.push(`---`);
+  lines.push(`💡 **Use case:** These are the models that have a direct relationship to ${targetModel}.`);
+  lines.push(`You can use these foreign keys to join data across models.`);
 
   return lines.join('\n');
 }

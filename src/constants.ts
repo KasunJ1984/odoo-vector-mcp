@@ -27,7 +27,7 @@ export const QDRANT_CONFIG = {
   HOST: process.env.QDRANT_HOST || 'http://localhost:6333',
   API_KEY: process.env.QDRANT_API_KEY || '',
   COLLECTION: process.env.SCHEMA_COLLECTION_NAME || 'odoo_schema',
-  VECTOR_SIZE: parseInt(process.env.EMBEDDING_DIMENSIONS || '1024', 10),
+  VECTOR_SIZE: parseInt(process.env.VECTOR_SIZE || process.env.EMBEDDING_DIMENSIONS || '512', 10),
   DISTANCE_METRIC: 'Cosine' as const,
 } as const;
 
@@ -36,8 +36,8 @@ export const QDRANT_CONFIG = {
  */
 export const VOYAGE_CONFIG = {
   API_KEY: process.env.VOYAGE_API_KEY || '',
-  MODEL: process.env.EMBEDDING_MODEL || 'voyage-3',
-  DIMENSIONS: parseInt(process.env.EMBEDDING_DIMENSIONS || '1024', 10),
+  MODEL: process.env.EMBEDDING_MODEL || 'voyage-3-lite',
+  DIMENSIONS: parseInt(process.env.VECTOR_SIZE || process.env.EMBEDDING_DIMENSIONS || '512', 10),
   MAX_BATCH_SIZE: 128,
   INPUT_TYPE_DOCUMENT: 'document' as const,
   INPUT_TYPE_QUERY: 'query' as const,

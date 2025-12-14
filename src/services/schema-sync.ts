@@ -147,6 +147,11 @@ export async function syncSchemaToQdrant(
         // Generate embeddings
         const embeddings = await embedBatch(semanticTexts, 'document');
 
+        // Log embedding dimensions for first batch
+        if (batchIndex === 0 && embeddings.length > 0) {
+          console.error(`[SchemaSync] Embedding dimensions: ${embeddings[0].length}`);
+        }
+
         // Build points for upsert
         const points: SchemaPoint[] = [];
         for (let i = 0; i < batch.length; i++) {
@@ -173,6 +178,10 @@ export async function syncSchemaToQdrant(
         }
       } catch (batchError) {
         const errorMsg = batchError instanceof Error ? batchError.message : String(batchError);
+        // Log full error for first batch to debug
+        if (batchIndex === 0) {
+          console.error(`[SchemaSync] First batch error details:`, JSON.stringify(batchError, null, 2));
+        }
         console.error(`[SchemaSync] Batch ${batchIndex + 1} error:`, errorMsg);
         errors.push(`Batch ${batchIndex + 1} error: ${errorMsg}`);
         failed += batch.length;

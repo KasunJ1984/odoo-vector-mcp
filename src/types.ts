@@ -129,11 +129,18 @@ export interface SchemaSearchResult {
 
 /**
  * Filter for schema search
+ *
+ * Supports multiple search modes:
+ * - semantic: Vector similarity search with optional filters
+ * - list: Get all fields in a model (filter only)
+ * - references_out: Find relational fields in a model
+ * - references_in: Find fields that reference a model
  */
 export interface SchemaFilter {
-  model_name?: string;        // Filter by model (e.g., "crm.lead")
-  field_type?: string;        // Filter by type (e.g., "many2one")
-  stored_only?: boolean;      // Only stored fields
+  model_name?: string;                    // Filter by model (e.g., "crm.lead")
+  field_type?: string | string[];         // Filter by type(s) (e.g., "many2one" or ["many2one", "one2many"])
+  stored_only?: boolean;                  // Only stored fields
+  primary_data_location_prefix?: string;  // Filter by primary_data_location prefix (for references_in)
 }
 
 /**

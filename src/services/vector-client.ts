@@ -100,6 +100,7 @@ export async function createSchemaCollection(): Promise<boolean> {
     { field: 'stored', type: 'bool' as const },
     { field: 'model_id', type: 'integer' as const },
     { field: 'field_id', type: 'integer' as const },
+    { field: 'primary_data_location', type: 'keyword' as const },  // For references_in mode
   ];
 
   for (const { field, type } of indexFields) {
@@ -245,12 +246,47 @@ export async function countSchemas(filter?: SchemaFilter): Promise<number> {
   return result.count;
 }
 
+/**
+ * Scroll schema collection with filters (no vector similarity)
+ *
+ * Used for list mode and reference searches where we want ALL matching
+ * results, not just semantically similar ones.
+ */
+export async function scrollSchemaCollection(options: {
+  filter: SchemaFilter;
+  limit?: number;
+}): Promise<VectorSearchResult[]> {
+  if (!qdrantClient) throw new Error('Vector client not initialized');
+
+  const { filter, limit = 100 } = options;
+  const qdrantFilter = buildQdrantFilter(filter);
+
+  const results = await qdrantClient.scroll(QDRANT_CONFIG.COLLECTION, {
+    filter: qdrantFilter,
+    limit,
+    with_payload: true,
+    with_vector: false,
+  });
+
+  return results.points.map(p => ({
+    id: p.id as number,
+    score: 1.0, // No similarity score in scroll mode
+    payload: p.payload as unknown as SchemaPayload,
+  }));
+}
+
 // =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
 
 /**
  * Build Qdrant filter from SchemaFilter
+ *
+ * Supports:
+ * - Exact match on model_name
+ * - Exact match or array of field_types
+ * - Prefix match on primary_data_location (for references_in)
+ * - Boolean match on stored
  */
 function buildQdrantFilter(filter: SchemaFilter): { must: object[] } {
   const must: object[] = [];
@@ -259,8 +295,26 @@ function buildQdrantFilter(filter: SchemaFilter): { must: object[] } {
     must.push({ key: 'model_name', match: { value: filter.model_name } });
   }
 
+  // Support single field type or array of field types
   if (filter.field_type) {
-    must.push({ key: 'field_type', match: { value: filter.field_type } });
+    if (Array.isArray(filter.field_type)) {
+      // Match any of the field types
+      must.push({
+        key: 'field_type',
+        match: { any: filter.field_type },
+      });
+    } else {
+      must.push({ key: 'field_type', match: { value: filter.field_type } });
+    }
+  }
+
+  // Prefix match for primary_data_location (used in references_in mode)
+  // e.g., "res.partner" matches "res.partner.id", "res.partner.name", etc.
+  if (filter.primary_data_location_prefix) {
+    must.push({
+      key: 'primary_data_location',
+      match: { text: filter.primary_data_location_prefix },
+    });
   }
 
   if (filter.stored_only === true) {

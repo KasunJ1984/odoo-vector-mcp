@@ -112,53 +112,65 @@ export function parseSchemaRow(encodedRow: string): OdooSchemaRow | null {
 }
 
 /**
- * Build semantic text for embedding
+ * Build semantic text for embedding (Hybrid Approach)
  *
- * Creates a human-readable description that captures the semantic meaning
- * of the field for better vector search results.
+ * Creates a coordinate-aware description that captures both:
+ * 1. Semantic meaning for natural language search
+ * 2. Coordinate patterns for structural queries
+ *
+ * The 4^XX* encoding is a memory block coordinate system:
+ * - 4 = ir.model.fields table
+ * - 58 = model_id column, 26 = field_name column, 28 = model_name column
+ * - VALUE = the actual data (model ID, field name, etc.)
  *
  * @param schema - Parsed schema row
- * @returns Semantic text string
+ * @returns Semantic text string with coordinate awareness
  */
 export function buildSemanticText(schema: OdooSchemaRow): string {
   const parts: string[] = [];
 
-  // Model and field identity
-  parts.push(`${schema.model_name} field ${schema.field_name}`);
+  // 1. OWNERSHIP with coordinate - This field BELONGS TO this model
+  parts.push(`FIELD IN ${schema.model_name} (model_id ${schema.model_id}):`);
+  parts.push(`${schema.field_name} (field_id ${schema.field_id})`);
 
-  // Human-readable label
+  // 2. Coordinate patterns for structural queries
+  parts.push(`- model coordinate 4^58*${schema.model_id}`);
+  parts.push(`- field coordinate 4^58*${schema.field_id}`);
+
+  // 3. Synonyms for better natural language matching
+  parts.push(`column attribute property of ${schema.model_name}`);
+
+  // 4. Human-readable label
   if (schema.field_label && schema.field_label !== schema.field_name) {
-    parts.push(`(${schema.field_label})`);
+    parts.push(`labeled "${schema.field_label}"`);
   }
 
-  // Field type with relationship info
+  // 5. Field type
+  parts.push(`- ${schema.field_type} type`);
+
+  // 6. REFERENCE (for relational fields) - clearly marked as reference, not membership
   if (schema.field_type === 'many2one') {
     // Extract related model from primary_data_location (e.g., "res.users.id" → "res.users")
     const relatedModel = schema.primary_data_location.replace('.id', '');
-    parts.push(`- many2one relationship to ${relatedModel}`);
+    parts.push(`- REFERENCES ${relatedModel}`);
+    parts.push(`- foreign key linking to ${relatedModel}`);
   } else if (schema.field_type === 'one2many') {
-    parts.push(`- one2many relationship`);
+    parts.push(`- one2many related records in other model`);
   } else if (schema.field_type === 'many2many') {
-    parts.push(`- many2many relationship`);
-  } else {
-    parts.push(`- ${schema.field_type} type`);
+    parts.push(`- many2many related records`);
   }
 
-  // Primary data location
+  // 7. Storage info
+  parts.push(schema.stored ? `- stored in database` : `- computed field not stored`);
+
+  // 8. Data location
   if (schema.primary_data_location && schema.primary_data_location !== 'Computed') {
-    parts.push(`- Data stored at ${schema.primary_data_location}`);
-  } else if (schema.primary_data_location === 'Computed') {
-    parts.push(`- Computed field (not stored)`);
+    parts.push(`- data at ${schema.primary_data_location}`);
   }
 
-  // Storage status
-  if (schema.stored) {
-    parts.push(`- Stored in database`);
-  }
-
-  // Primary reference IDs
+  // 9. Primary reference IDs for direct access
   if (schema.primary_model_id && schema.primary_field_id) {
-    parts.push(`- Reference: Model ${schema.primary_model_id}, Field ${schema.primary_field_id}`);
+    parts.push(`- primary ref ${schema.primary_model_id}^${schema.primary_field_id}`);
   }
 
   return parts.join(' ');
