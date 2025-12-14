@@ -191,19 +191,30 @@ export async function searchSchemaCollection(
 
   const qdrantFilter = filter ? buildQdrantFilter(filter) : undefined;
 
-  const results = await qdrantClient.search(QDRANT_CONFIG.COLLECTION, {
-    vector,
-    limit,
-    score_threshold: minScore,
-    filter: qdrantFilter,
-    with_payload: true,
-  });
+  try {
+    const results = await qdrantClient.search(QDRANT_CONFIG.COLLECTION, {
+      vector,
+      limit,
+      score_threshold: minScore,
+      filter: qdrantFilter,
+      with_payload: true,
+    });
 
-  return results.map(r => ({
-    id: r.id as number,
-    score: r.score,
-    payload: r.payload as unknown as SchemaPayload,
-  }));
+    return results.map(r => ({
+      id: r.id as number,
+      score: r.score,
+      payload: r.payload as unknown as SchemaPayload,
+    }));
+  } catch (error) {
+    console.error('[Vector] Search failed:', {
+      collection: QDRANT_CONFIG.COLLECTION,
+      filter: qdrantFilter ? JSON.stringify(qdrantFilter, null, 2) : 'none',
+      limit,
+      minScore,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
 }
 
 /**
@@ -261,18 +272,28 @@ export async function scrollSchemaCollection(options: {
   const { filter, limit = 100 } = options;
   const qdrantFilter = buildQdrantFilter(filter);
 
-  const results = await qdrantClient.scroll(QDRANT_CONFIG.COLLECTION, {
-    filter: qdrantFilter,
-    limit,
-    with_payload: true,
-    with_vector: false,
-  });
+  try {
+    const results = await qdrantClient.scroll(QDRANT_CONFIG.COLLECTION, {
+      filter: qdrantFilter,
+      limit,
+      with_payload: true,
+      with_vector: false,
+    });
 
-  return results.points.map(p => ({
-    id: p.id as number,
-    score: 1.0, // No similarity score in scroll mode
-    payload: p.payload as unknown as SchemaPayload,
-  }));
+    return results.points.map(p => ({
+      id: p.id as number,
+      score: 1.0, // No similarity score in scroll mode
+      payload: p.payload as unknown as SchemaPayload,
+    }));
+  } catch (error) {
+    console.error('[Vector] Scroll failed:', {
+      collection: QDRANT_CONFIG.COLLECTION,
+      filter: JSON.stringify(qdrantFilter, null, 2),
+      limit,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
 }
 
 // =============================================================================
