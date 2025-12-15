@@ -2,17 +2,24 @@
  * Data Transform Tool
  *
  * MCP tool for transforming and syncing Odoo table data to vector database.
- * Provides two tools:
- * 1. transform_data - Sync crm.lead data (requires trigger code)
+ * Provides three tools:
+ * 1. transform_data - Sync ANY model data (dynamic model discovery!)
+ *    - Command format: transfer_[model.name]_1984
+ *    - Examples: transfer_crm.lead_1984, transfer_res.partner_1984
  * 2. preview_encoding - Preview encoding map for any model (no sync)
+ * 3. data_status - Check sync status in vector database
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { TransformDataSchema, PreviewEncodingSchema } from '../schemas/index.js';
 import type { TransformDataInput, PreviewEncodingInput } from '../schemas/index.js';
-import { syncModelData, getDataSyncStatus } from '../services/data-sync.js';
+import {
+  syncModelData,
+  getDataSyncStatus,
+  extractModelNameFromCommand,
+  discoverModelConfig,
+} from '../services/data-sync.js';
 import { previewEncodingMap } from '../services/data-transformer.js';
-import { DATA_TRANSFORM_CONFIG } from '../constants.js';
 
 // =============================================================================
 // TOOL REGISTRATION
@@ -28,57 +35,87 @@ export function registerDataTools(server: McpServer): void {
 
   server.tool(
     'transform_data',
-    `Transform and sync Odoo crm.lead data to vector database.
+    `Transform and sync ANY Odoo model data to vector database.
+
+**DYNAMIC MODEL SUPPORT:**
+This tool now supports ANY Odoo model! The model configuration (model_id, fields)
+is automatically discovered from the schema.
+
+**TRIGGER FORMAT:**
+\`transfer_[model.name]_1984\`
+
+Examples:
+- \`transfer_crm.lead_1984\` → Sync CRM leads
+- \`transfer_res.partner_1984\` → Sync contacts/partners
+- \`transfer_sale.order_1984\` → Sync sales orders
+- \`transfer_product.product_1984\` → Sync products
 
 **DATA ENCODING FORMAT:**
-Unlike schema (4^XX*), data uses: [model_id]^[field_id]*VALUE
+Each record is encoded as: [model_id]^[field_id]*VALUE
 
 Example crm.lead record (model_id=344):
 \`344^6327*12345|344^6299*450000|78^956*201|345^6237*4\`
 
-Where:
-- \`344^6327*12345\` = crm.lead.id = 12345
-- \`344^6299*450000\` = expected_revenue = 450000
-- \`78^956*201\` = partner_id → res.partner id=201 (FK uses TARGET model prefix!)
-- \`345^6237*4\` = stage_id → crm.stage id=4
-
-**TRIGGER FORMAT:**
-To prevent accidental syncs, you MUST use the exact command:
-\`transfer_crm.lead_1984\`
+**HOW IT WORKS:**
+1. Extracts model name from command (e.g., "res.partner" from "transfer_res.partner_1984")
+2. Discovers model_id and fields from schema automatically
+3. Validates ALL fields exist in schema before sync
+4. Fetches ALL records from Odoo
+5. Encodes and embeds each record
+6. Uploads to vector database
 
 **SCHEMA VALIDATION:**
 Before sync, the tool validates that ALL Odoo fields have schema entries.
 If any field is missing from schema, sync will ABORT with error.
+Run schema sync first if needed.
 
 **DEFAULT BEHAVIOR:**
-- Syncs ALL records in crm.lead table (including archived/inactive)
+- Syncs ALL records in the table (including archived/inactive)
 - No limit by default - full table sync
 - Use test_limit ONLY for debugging
 
 **EXAMPLES:**
-- Full sync: \`{ "command": "transfer_crm.lead_1984" }\`
-- Exclude archived: \`{ "command": "transfer_crm.lead_1984", "include_archived": false }\`
+- Sync CRM leads: \`{ "command": "transfer_crm.lead_1984" }\`
+- Sync partners: \`{ "command": "transfer_res.partner_1984" }\`
+- Exclude archived: \`{ "command": "transfer_res.partner_1984", "include_archived": false }\`
 - Test with 10 records: \`{ "command": "transfer_crm.lead_1984", "test_limit": 10 }\``,
     TransformDataSchema.shape,
     async (args) => {
       try {
         const input = TransformDataSchema.parse(args) as TransformDataInput;
 
-        // Validate the trigger command
-        if (input.command !== 'transfer_crm.lead_1984') {
+        // Extract model name from the command dynamically
+        let modelName: string;
+        try {
+          modelName = extractModelNameFromCommand(input.command);
+        } catch {
           return {
             content: [{
               type: 'text',
-              text: `Invalid command. Use exactly: transfer_crm.lead_1984`,
+              text: `Invalid command format.\n\nExpected: transfer_[model.name]_1984\nExamples:\n- transfer_crm.lead_1984\n- transfer_res.partner_1984\n- transfer_sale.order_1984`,
             }],
           };
         }
 
-        // Get crm.lead configuration
+        // Discover model configuration from schema
+        let discoveredConfig;
+        try {
+          discoveredConfig = discoverModelConfig(modelName);
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : String(error);
+          return {
+            content: [{
+              type: 'text',
+              text: `Model Discovery Failed\n======================\n${errMsg}`,
+            }],
+          };
+        }
+
+        // Build the configuration for sync
         const config = {
-          model_name: DATA_TRANSFORM_CONFIG.MODELS.CRM_LEAD.model_name,
-          model_id: DATA_TRANSFORM_CONFIG.MODELS.CRM_LEAD.model_id,
-          id_field_id: DATA_TRANSFORM_CONFIG.MODELS.CRM_LEAD.id_field_id,
+          model_name: discoveredConfig.model_name,
+          model_id: discoveredConfig.model_id,
+          id_field_id: discoveredConfig.id_field_id,
           include_archived: input.include_archived,
           test_limit: input.test_limit,
         };

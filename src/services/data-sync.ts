@@ -21,6 +21,7 @@ import {
   transformRecords,
   getFieldsToFetch,
 } from './data-transformer.js';
+import { getSchemasByModel, getAllModelNames } from './schema-loader.js';
 import { DATA_TRANSFORM_CONFIG, QDRANT_CONFIG } from '../constants.js';
 import type {
   DataTransformConfig,
@@ -29,6 +30,107 @@ import type {
   DataPayload,
   ValidationResult,
 } from '../types.js';
+
+// =============================================================================
+// DYNAMIC MODEL CONFIGURATION DISCOVERY
+// =============================================================================
+
+/**
+ * Discovered model configuration from schema
+ */
+export interface DiscoveredModelConfig {
+  model_name: string;
+  model_id: number;
+  id_field_id: number;
+  field_count: number;
+}
+
+/**
+ * Extract model name from the transfer command
+ *
+ * Format: "transfer_[model.name]_1984"
+ * Examples:
+ * - "transfer_crm.lead_1984" → "crm.lead"
+ * - "transfer_res.partner_1984" → "res.partner"
+ * - "transfer_sale.order_1984" → "sale.order"
+ *
+ * @param command - The full transfer command
+ * @returns Extracted model name
+ */
+export function extractModelNameFromCommand(command: string): string {
+  // Pattern: transfer_[model.name]_1984
+  // Remove "transfer_" prefix and "_1984" suffix
+  const match = command.match(/^transfer_(.+)_1984$/);
+  if (!match) {
+    throw new Error(`Invalid command format: ${command}. Expected: transfer_[model.name]_1984`);
+  }
+  return match[1];
+}
+
+/**
+ * Discover model configuration from schema
+ *
+ * Dynamically extracts model_id and id_field_id from the schema data.
+ * This allows ANY model to be synced without hardcoding configurations.
+ *
+ * How it works:
+ * 1. Get all schema fields for the model
+ * 2. Extract model_id from any field (all fields in a model have the same model_id)
+ * 3. Find the 'id' field and get its field_id
+ *
+ * @param modelName - Odoo model name (e.g., "res.partner")
+ * @returns DiscoveredModelConfig with model_id and id_field_id
+ * @throws Error if model not found in schema
+ */
+export function discoverModelConfig(modelName: string): DiscoveredModelConfig {
+  console.error(`[DataSync] Discovering config for model: ${modelName}`);
+
+  // Get all fields for this model from schema
+  const modelFields = getSchemasByModel(modelName);
+
+  if (modelFields.length === 0) {
+    // Get list of available models to help user
+    const availableModels = getAllModelNames();
+    const similarModels = availableModels
+      .filter(m => m.includes(modelName.split('.')[0]) || modelName.includes(m.split('.')[0]))
+      .slice(0, 5);
+
+    throw new Error(
+      `Model "${modelName}" not found in schema.\n` +
+      `Total models in schema: ${availableModels.length}\n` +
+      (similarModels.length > 0
+        ? `Similar models: ${similarModels.join(', ')}`
+        : `Run schema sync first to populate the schema.`)
+    );
+  }
+
+  // Extract model_id from first field (all fields in same model have same model_id)
+  const model_id = modelFields[0].model_id;
+
+  // Find the 'id' field to get its field_id
+  const idField = modelFields.find(f => f.field_name === 'id');
+  if (!idField) {
+    throw new Error(
+      `Model "${modelName}" does not have an 'id' field in schema.\n` +
+      `Found ${modelFields.length} fields, but none named 'id'.\n` +
+      `This may indicate incomplete schema data.`
+    );
+  }
+
+  const config: DiscoveredModelConfig = {
+    model_name: modelName,
+    model_id: model_id,
+    id_field_id: idField.field_id,
+    field_count: modelFields.length,
+  };
+
+  console.error(`[DataSync] Discovered config for ${modelName}:`);
+  console.error(`  - model_id: ${config.model_id}`);
+  console.error(`  - id_field_id: ${config.id_field_id}`);
+  console.error(`  - field_count: ${config.field_count}`);
+
+  return config;
+}
 
 // =============================================================================
 // POINT ID GENERATION

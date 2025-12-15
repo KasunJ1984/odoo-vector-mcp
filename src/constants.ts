@@ -182,6 +182,14 @@ export const CACHE_CONFIG = {
  * [model_id]^[field_id]*VALUE
  *
  * Example: 344^6327*12345|344^6299*50000|78^956*201
+ *
+ * NOTE: Model configurations are now DYNAMIC!
+ * The tool automatically discovers model_id and id_field_id from the schema.
+ * Just use: transfer_[model.name]_1984
+ * Examples:
+ * - transfer_crm.lead_1984
+ * - transfer_res.partner_1984
+ * - transfer_sale.order_1984
  */
 export const DATA_TRANSFORM_CONFIG = {
   /** Records per Odoo API call */
@@ -196,21 +204,6 @@ export const DATA_TRANSFORM_CONFIG = {
   MODEL_ID_MULTIPLIER: 10_000_000,
   /** Trigger code required to confirm data sync */
   SYNC_CODE: '1984',
-
-  /**
-   * Supported models with their configurations
-   * Initially only crm.lead is supported
-   */
-  MODELS: {
-    CRM_LEAD: {
-      model_name: 'crm.lead',
-      model_id: 344,
-      id_field_id: 6327,
-    },
-    // Future models can be added here:
-    // RES_PARTNER: { model_name: 'res.partner', model_id: 78, id_field_id: 956 },
-    // CRM_STAGE: { model_name: 'crm.stage', model_id: 345, id_field_id: 6237 },
-  },
 } as const;
 
 // =============================================================================

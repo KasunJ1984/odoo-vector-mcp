@@ -150,31 +150,43 @@ export type SyncInput = z.infer<typeof SyncSchema>;
 /**
  * Schema for transform_data tool input
  *
- * Transforms Odoo table data into coordinate-encoded format for embedding.
- * Trigger format: "transfer_crm.lead_1984" to prevent accidental syncs.
+ * Transforms ANY Odoo model data into coordinate-encoded format for embedding.
+ * Now supports DYNAMIC model discovery - provide any model name and the tool
+ * automatically discovers fields from the schema.
+ *
+ * Trigger format: "transfer_[model.name]_1984" to prevent accidental syncs.
+ * Examples:
+ * - "transfer_crm.lead_1984"
+ * - "transfer_res.partner_1984"
+ * - "transfer_sale.order_1984"
  */
 export const TransformDataSchema = z.object({
   /**
-   * Trigger command - must match exact pattern to prevent accidents
+   * Trigger command - must match pattern to prevent accidents
    *
-   * Format: "transfer_crm.lead_1984"
+   * Format: "transfer_[model.name]_1984"
    * - "transfer_" = action prefix
-   * - "crm.lead" = model name
+   * - "[model.name]" = any valid Odoo model name (e.g., crm.lead, res.partner)
    * - "_1984" = confirmation code
    *
-   * This ensures user explicitly confirms the data sync operation.
+   * Examples:
+   * - "transfer_crm.lead_1984"
+   * - "transfer_res.partner_1984"
+   * - "transfer_product.product_1984"
+   *
+   * The tool extracts the model name and validates it exists in the schema.
    */
   command: z
     .string()
     .regex(
-      /^transfer_crm\.lead_1984$/,
-      'Command must be exactly "transfer_crm.lead_1984" to confirm data sync'
+      /^transfer_[a-z_]+(\.[a-z_]+)*_1984$/,
+      'Command must be "transfer_[model.name]_1984" (e.g., transfer_crm.lead_1984, transfer_res.partner_1984)'
     )
-    .describe('Trigger command: Must be exactly "transfer_crm.lead_1984" to sync crm.lead data'),
+    .describe('Trigger command: "transfer_[model.name]_1984" - extracts model name dynamically'),
 
   /**
    * Include archived records (active=false)
-   * Default: true - sync ALL records including lost opportunities
+   * Default: true - sync ALL records including archived
    */
   include_archived: z
     .boolean()
