@@ -170,3 +170,45 @@ export const CACHE_CONFIG = {
   TTL_MS: parseInt(process.env.CACHE_TTL_MS || '1800000', 10), // 30 minutes
   ENABLED: process.env.CACHE_ENABLED !== 'false',
 } as const;
+
+// =============================================================================
+// DATA TRANSFORMER CONFIGURATION (Phase 2 - Data Encoding)
+// =============================================================================
+
+/**
+ * Data transformer configuration
+ *
+ * Transforms Odoo table data into coordinate-encoded format:
+ * [model_id]^[field_id]*VALUE
+ *
+ * Example: 344^6327*12345|344^6299*50000|78^956*201
+ */
+export const DATA_TRANSFORM_CONFIG = {
+  /** Records per Odoo API call */
+  FETCH_BATCH_SIZE: 200,
+  /** Records per embedding API call */
+  EMBED_BATCH_SIZE: 100,
+  /**
+   * Point ID multiplier to ensure no clash with schema field_ids
+   * Point ID = model_id * 10_000_000 + record_id
+   * Example: crm.lead (344) record 12345 = 3440012345
+   */
+  MODEL_ID_MULTIPLIER: 10_000_000,
+  /** Trigger code required to confirm data sync */
+  SYNC_CODE: '1984',
+
+  /**
+   * Supported models with their configurations
+   * Initially only crm.lead is supported
+   */
+  MODELS: {
+    CRM_LEAD: {
+      model_name: 'crm.lead',
+      model_id: 344,
+      id_field_id: 6327,
+    },
+    // Future models can be added here:
+    // RES_PARTNER: { model_name: 'res.partner', model_id: 78, id_field_id: 956 },
+    // CRM_STAGE: { model_name: 'crm.stage', model_id: 345, id_field_id: 6237 },
+  },
+} as const;

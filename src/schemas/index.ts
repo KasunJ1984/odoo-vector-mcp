@@ -133,10 +133,85 @@ export const SyncSchema = z.object({
 export type SyncInput = z.infer<typeof SyncSchema>;
 
 // =============================================================================
+// TRANSFORM DATA SCHEMA (Phase 2 - Data Encoding)
+// =============================================================================
+
+/**
+ * Schema for transform_data tool input
+ *
+ * Transforms Odoo table data into coordinate-encoded format for embedding.
+ * Trigger format: "transfer_crm.lead_1984" to prevent accidental syncs.
+ */
+export const TransformDataSchema = z.object({
+  /**
+   * Trigger command - must match exact pattern to prevent accidents
+   *
+   * Format: "transfer_crm.lead_1984"
+   * - "transfer_" = action prefix
+   * - "crm.lead" = model name
+   * - "_1984" = confirmation code
+   *
+   * This ensures user explicitly confirms the data sync operation.
+   */
+  command: z
+    .string()
+    .regex(
+      /^transfer_crm\.lead_1984$/,
+      'Command must be exactly "transfer_crm.lead_1984" to confirm data sync'
+    )
+    .describe('Trigger command: Must be exactly "transfer_crm.lead_1984" to sync crm.lead data'),
+
+  /**
+   * Include archived records (active=false)
+   * Default: true - sync ALL records including lost opportunities
+   */
+  include_archived: z
+    .boolean()
+    .default(true)
+    .describe('Include archived records (active=false). Default: true'),
+
+  /**
+   * TESTING ONLY: Limit records for debugging
+   * Omit this parameter for full table sync
+   */
+  test_limit: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe('TESTING ONLY: Limit records for debugging. Omit for full table sync.'),
+}).strict();
+
+/**
+ * Inferred type from schema
+ */
+export type TransformDataInput = z.infer<typeof TransformDataSchema>;
+
+/**
+ * Schema for preview encoding map (no sync)
+ */
+export const PreviewEncodingSchema = z.object({
+  /**
+   * Model name to preview encoding map for
+   */
+  model_name: z
+    .string()
+    .min(1)
+    .describe('Model name to preview encoding map for (e.g., "crm.lead")'),
+}).strict();
+
+/**
+ * Inferred type from schema
+ */
+export type PreviewEncodingInput = z.infer<typeof PreviewEncodingSchema>;
+
+// =============================================================================
 // EXPORT ALL SCHEMAS
 // =============================================================================
 
 export const schemas = {
   SemanticSearchSchema,
   SyncSchema,
+  TransformDataSchema,
+  PreviewEncodingSchema,
 };

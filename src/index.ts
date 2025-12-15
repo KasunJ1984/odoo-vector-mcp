@@ -21,6 +21,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express, { Request, Response } from 'express';
 import { registerSearchTools } from './tools/search-tool.js';
+import { registerDataTools } from './tools/data-tool.js';
 import { initializeEmbeddingService } from './services/embedding-service.js';
 import { initializeVectorClient } from './services/vector-client.js';
 
@@ -43,6 +44,9 @@ const server = new McpServer({
 
 // Register search tools (semantic_search + sync)
 registerSearchTools(server);
+
+// Register data transform tools (transform_data, preview_encoding, data_status)
+registerDataTools(server);
 
 // =============================================================================
 // STDIO TRANSPORT (for Desktop Claude & Claude Code)
@@ -123,6 +127,9 @@ async function runHttp(): Promise<void> {
     console.error('Tools available:');
     console.error('  - semantic_search: Search Odoo schema semantically');
     console.error('  - sync: Upload schema to vector database');
+    console.error('  - transform_data: Sync crm.lead data to vector database');
+    console.error('  - preview_encoding: Preview encoding map for a model');
+    console.error('  - data_status: Check data sync status');
   });
 }
 

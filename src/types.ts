@@ -261,3 +261,129 @@ export interface IncrementalSyncResult {
   /** Error messages if any */
   errors?: string[];
 }
+
+// =============================================================================
+// DATA TRANSFORMER TYPES (Phase 2 - Data Encoding)
+// =============================================================================
+
+/**
+ * Field encoding map: field_name → encoding prefix
+ *
+ * The prefix format is: [model_id]^[field_id]
+ * - For native fields: model's own prefix (e.g., "344^6299" for expected_revenue)
+ * - For FK fields: TARGET model's id prefix (e.g., "78^956" for partner_id → res.partner)
+ */
+export interface FieldEncodingMap {
+  [field_name: string]: {
+    /** Encoding prefix: model_id^field_id (e.g., "344^6299" or "78^956") */
+    prefix: string;
+    /** Field type from schema (char, many2one, boolean, etc.) */
+    field_type: string;
+    /** True if many2one/many2many field */
+    is_foreign_key: boolean;
+    /** For FK fields: target model name (e.g., "res.partner") */
+    target_model?: string;
+  };
+}
+
+/**
+ * Encoded record ready for embedding
+ */
+export interface EncodedRecord {
+  /** Odoo record ID */
+  record_id: number;
+  /** Source model name (e.g., "crm.lead") */
+  model_name: string;
+  /** Model ID for point ID generation */
+  model_id: number;
+  /** The full encoded string: 344^6327*1|344^6299*50000|... */
+  encoded_string: string;
+  /** Number of fields in the encoded string */
+  field_count: number;
+}
+
+/**
+ * Data payload stored in Qdrant vector
+ * Distinguished from SchemaPayload by point_type: 'data'
+ */
+export interface DataPayload {
+  /** Odoo record ID */
+  record_id: number;
+  /** Source model name */
+  model_name: string;
+  /** Model ID */
+  model_id: number;
+  /** The encoded string */
+  encoded_string: string;
+  /** Number of fields encoded */
+  field_count: number;
+  /** When this record was synced */
+  sync_timestamp: string;
+  /** Type discriminator to distinguish from schema */
+  point_type: 'data';
+}
+
+/**
+ * Data point for upserting to Qdrant
+ */
+export interface DataPoint {
+  /** Unique ID: model_id * 10_000_000 + record_id */
+  id: number;
+  /** Embedding vector */
+  vector: number[];
+  /** Data payload */
+  payload: DataPayload;
+}
+
+/**
+ * Result of data sync operation
+ */
+export interface DataSyncResult {
+  /** Whether sync completed successfully */
+  success: boolean;
+  /** Model name that was synced */
+  model_name: string;
+  /** Total records processed from Odoo */
+  records_processed: number;
+  /** Records successfully embedded and uploaded */
+  records_embedded: number;
+  /** Records that failed to process */
+  records_failed: number;
+  /** Total duration in milliseconds */
+  duration_ms: number;
+  /** Error messages if any */
+  errors?: string[];
+}
+
+/**
+ * Schema-Data validation result
+ *
+ * Ensures every Odoo field has a corresponding schema entry.
+ * Sync will FAIL if any field is missing from schema.
+ */
+export interface ValidationResult {
+  /** True if all Odoo fields have schema entries */
+  valid: boolean;
+  /** Fields that matched between Odoo and schema */
+  matched_fields: string[];
+  /** Odoo fields NOT in schema - CAUSES FAILURE */
+  missing_in_schema: string[];
+  /** Schema fields not in Odoo - informational only */
+  missing_in_odoo: string[];
+}
+
+/**
+ * Configuration for data transform operation
+ */
+export interface DataTransformConfig {
+  /** Model name (e.g., "crm.lead") */
+  model_name: string;
+  /** Model ID (e.g., 344 for crm.lead) */
+  model_id: number;
+  /** Field ID for the 'id' column (e.g., 6327 for crm.lead.id) */
+  id_field_id: number;
+  /** Include archived records (active=false). Default: true */
+  include_archived?: boolean;
+  /** Testing only: limit records for debugging */
+  test_limit?: number;
+}
