@@ -26,7 +26,7 @@ This document tracks incremental improvements to the Odoo Vector MCP server. Eac
 |---|-------------|--------|----------------|-------|
 | 0 | Bug Fixes (references_in, error logging) | ✅ DONE | Dec 2024 | Commits: 578e5e1, 7a840d4, f57c6c5 |
 | 1 | Scalar Quantization | ✅ DONE | Dec 15, 2024 | Commit: 721341d - 75% memory reduction verified |
-| 2 | Query Caching (LRU) | 🔲 TODO | - | Faster repeat queries |
+| 2 | Query Caching (LRU) | ✅ DONE | Dec 15, 2024 | Commit: b2b28fa - 6/6 tests passed |
 | 3 | HNSW Parameter Tuning | 🔲 TODO | - | Better recall |
 | 4 | Upgrade to Voyage-3.5 | 🔲 TODO | - | Better embeddings |
 | 5 | Incremental Sync | 🔲 TODO | - | Faster updates |
@@ -1398,7 +1398,7 @@ ENABLE_HYDE=false
 |------|-------------|--------|-------|
 | Dec 2024 | Bug fixes (references_in, logging) | ✅ Done | Commits: 578e5e1, 7a840d4, f57c6c5 |
 | Dec 15, 2024 | #1 Scalar Quantization | ✅ Done | Commit: 721341d - int8 quantization, rescore params |
-| | #2 Query Caching | 🔲 Pending | |
+| Dec 15, 2024 | #2 Query Caching | ✅ Done | Commit: b2b28fa - LRU cache, 500 entries, 30min TTL |
 | | #3 HNSW Tuning | 🔲 Pending | |
 | | #4 Voyage-3.5 | 🔲 Pending | |
 | | #5 Incremental Sync | 🔲 Pending | |
