@@ -212,3 +212,73 @@ export const DATA_TRANSFORM_CONFIG = {
     // CRM_STAGE: { model_name: 'crm.stage', model_id: 345, id_field_id: 6237 },
   },
 } as const;
+
+// =============================================================================
+// NEXUS KEY FIELDS CONFIGURATION
+// =============================================================================
+
+/**
+ * Key fields to display for each model in decoded NEXUS output
+ *
+ * These fields are shown first and always displayed in search results.
+ * The analytics system will suggest additional fields based on usage.
+ *
+ * Field order determines display priority (first = most important).
+ */
+export const KEY_FIELDS_CONFIG: Record<string, readonly string[]> = {
+  'crm.lead': [
+    'name',              // Opportunity name (most important)
+    'expected_revenue',  // Deal value
+    'probability',       // Win probability %
+    'partner_id',        // Customer (FK → res.partner)
+    'stage_id',          // Pipeline stage (FK → crm.stage)
+    'user_id',           // Salesperson (FK → res.users)
+    'city',              // Location
+    'active',            // Active/Archived status
+  ],
+  // Future models can be added:
+  // 'res.partner': ['name', 'email', 'phone', 'city', 'is_company'],
+  // 'crm.stage': ['name', 'sequence'],
+} as const;
+
+// =============================================================================
+// NEXUS ANALYTICS CONFIGURATION
+// =============================================================================
+
+/**
+ * Configuration for the self-improving analytics system
+ *
+ * The analytics service tracks field usage to discover which fields
+ * are most important to users and automatically suggests promotions.
+ */
+export const ANALYTICS_CONFIG = {
+  /** File path for persisted analytics data */
+  DATA_FILE: 'data/analytics.json',
+  /** Maximum number of field usage records to track */
+  MAX_FIELD_ENTRIES: 5000,
+  /** How often to persist analytics to disk (ms) */
+  PERSIST_INTERVAL_MS: 60000, // 1 minute
+  /** Clear analytics when schema changes */
+  CLEAR_ON_SCHEMA_CHANGE: true,
+  /** Minimum score (0-100) to promote a field to key fields */
+  PROMOTION_THRESHOLD: 50,
+  /** Maximum key fields per model */
+  MAX_KEY_FIELDS: 12,
+} as const;
+
+// =============================================================================
+// NEXUS TRAINING DATA CONFIGURATION
+// =============================================================================
+
+/**
+ * Configuration for training data collection (Phase 2 preparation)
+ *
+ * Training pairs (NEXUS encoded → human readable) are collected
+ * during decode operations for future model training.
+ */
+export const TRAINING_CONFIG = {
+  /** Maximum number of training pairs to keep in memory */
+  MAX_PAIRS: 10000,
+  /** File path for persisted training data */
+  DATA_FILE: 'data/training.json',
+} as const;

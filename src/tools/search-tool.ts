@@ -17,8 +17,16 @@ import { embed, isEmbeddingServiceAvailable } from '../services/embedding-servic
 import { searchSchemaCollection, scrollSchemaCollection, isVectorClientAvailable, getCollectionInfo } from '../services/vector-client.js';
 import { syncSchemaToQdrant, getSyncStatus, incrementalSyncSchema } from '../services/schema-sync.js';
 import { getSchemaStats, getAllModelNames } from '../services/schema-loader.js';
-import { QDRANT_CONFIG } from '../constants.js';
+import { QDRANT_CONFIG, KEY_FIELDS_CONFIG } from '../constants.js';
 import { generateCacheKey, getCached, setCache, getCacheStats } from '../services/cache-service.js';
+import { decodeRecord, decodeRecordToText } from '../services/data-transformer.js';
+import {
+  trackFieldUsageBatch,
+  recordTrainingPair,
+  getAdaptiveKeyFields,
+  getAnalyticsSummary,
+  getTrainingStats,
+} from '../services/analytics-service.js';
 
 // =============================================================================
 // TOOL REGISTRATION
@@ -322,6 +330,41 @@ Try:
           const status = await getSyncStatus();
           const stats = getSchemaStats();
           const cacheStats = getCacheStats();
+          const analytics = getAnalyticsSummary();
+          const trainingStats = getTrainingStats();
+
+          // Build analytics section
+          let analyticsSection = `**NEXUS Analytics (Self-Improving):**
+- Total Decodes: ${analytics.total_decodes.toLocaleString()}
+- Total Searches: ${analytics.total_searches.toLocaleString()}
+- Data Age: ${analytics.data_age_hours} hours`;
+
+          if (analytics.top_fields.length > 0) {
+            analyticsSection += `\n\n**Top Decoded Fields:**\n${analytics.top_fields
+              .slice(0, 5)
+              .map(f => `- ${f.field}: ${f.count}`)
+              .join('\n')}`;
+          }
+
+          if (analytics.suggested_promotions.length > 0) {
+            analyticsSection += `\n\n**Suggested Key Field Promotions:**\n${analytics.suggested_promotions
+              .map(s => `- ${s}`)
+              .join('\n')}`;
+          }
+
+          // Build training data section
+          let trainingSection = `**Training Data (Phase 2):**
+- Total Pairs: ${trainingStats.total_pairs.toLocaleString()}`;
+
+          if (Object.keys(trainingStats.by_model).length > 0) {
+            trainingSection += `\n- By Model: ${Object.entries(trainingStats.by_model)
+              .map(([model, count]) => `${model}: ${count}`)
+              .join(', ')}`;
+          }
+
+          if (trainingStats.oldest && trainingStats.newest) {
+            trainingSection += `\n- Range: ${new Date(trainingStats.oldest).toLocaleDateString()} - ${new Date(trainingStats.newest).toLocaleDateString()}`;
+          }
 
           return {
             content: [{
@@ -343,7 +386,11 @@ Try:
 - Entries: ${cacheStats.size}/${cacheStats.maxSize}
 - Hit Rate: ${cacheStats.hitRate} (${cacheStats.hits} hits, ${cacheStats.misses} misses)
 
-**Field Types:**
+${analyticsSection}
+
+${trainingSection}
+
+**Field Types (Top 10):**
 ${Object.entries(stats.fieldTypes)
   .sort((a, b) => b[1] - a[1])
   .slice(0, 10)
@@ -541,18 +588,48 @@ function formatSearchResults(
     lines.push(`---`);
 
     if (isDataPayload(payload)) {
-      // Format DATA result
+      // Format DATA result with NEXUS decoding
       const dataPayload = payload as DataPayload;
       lines.push(`### ${i + 1}. [DATA] ${dataPayload.model_name} #${dataPayload.record_id}`);
-      lines.push(`**Record ID:** ${dataPayload.record_id}`);
-      lines.push(`**Model:** ${dataPayload.model_name}`);
-      lines.push(`**Fields:** ${dataPayload.field_count}`);
       lines.push(`**Score:** ${(score * 100).toFixed(1)}%`);
+      lines.push('');
 
-      // Show first part of encoded string (truncate if too long)
-      const encoded = dataPayload.encoded_string;
-      const preview = encoded.length > 150 ? encoded.substring(0, 150) + '...' : encoded;
-      lines.push(`**Encoded:** \`${preview}\``);
+      // Get adaptive key fields (config + analytics-discovered)
+      const keyFields = getAdaptiveKeyFields(dataPayload.model_name);
+
+      // Decode the record using NEXUS decoder
+      const decoded = decodeRecord(dataPayload.encoded_string, keyFields);
+
+      if (decoded.length > 0) {
+        lines.push('**Key Fields:**');
+        for (const field of decoded) {
+          lines.push(`- **${field.field_label}:** ${field.display_value}`);
+        }
+
+        // Track field usage for analytics (async, fire-and-forget)
+        setImmediate(() => {
+          const fieldNames = decoded.map(f => f.field_name);
+          trackFieldUsageBatch(dataPayload.model_name, fieldNames, 'decode');
+        });
+
+        // Record training pair for Phase 2
+        const decodedText = decodeRecordToText(dataPayload.encoded_string, keyFields);
+        setImmediate(() => {
+          recordTrainingPair(dataPayload.encoded_string, decodedText, dataPayload.model_name);
+        });
+      } else {
+        lines.push('*No decodable key fields found*');
+      }
+
+      // Collapsible raw encoded data
+      lines.push('');
+      lines.push('<details>');
+      lines.push('<summary>Raw encoded data (click to expand)</summary>');
+      lines.push('');
+      lines.push('```');
+      lines.push(dataPayload.encoded_string);
+      lines.push('```');
+      lines.push('</details>');
     } else {
       // Format SCHEMA result
       const schemaPayload = payload as SchemaPayload;
@@ -578,7 +655,8 @@ function formatSearchResults(
   // Add helpful tip at the end
   lines.push(`\n---`);
   if (dataResults.length > 0) {
-    lines.push(`💡 **Tip:** Data records use coordinate encoding. Use schema search to decode field meanings.`);
+    lines.push(`💡 **NEXUS Decode:** Key fields automatically decoded from coordinate encoding.`);
+    lines.push(`   Expand "Raw encoded data" for full NEXUS coordinates.`);
   } else {
     lines.push(`💡 **Tip:** Use Model ID and Field ID to access data directly via Odoo API.`);
   }

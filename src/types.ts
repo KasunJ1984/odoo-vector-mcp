@@ -410,3 +410,198 @@ export interface DataTransformConfig {
   /** Testing only: limit records for debugging */
   test_limit?: number;
 }
+
+// =============================================================================
+// NEXUS DECODE TYPES (Human Interface Layer)
+// =============================================================================
+
+/**
+ * Coordinate metadata from reverse lookup
+ *
+ * Maps a NEXUS coordinate like "344^6299" to field metadata.
+ * This enables the decoder to translate coordinates into human-readable labels.
+ */
+export interface CoordinateMetadata {
+  /** Technical field name (e.g., "expected_revenue") */
+  field_name: string;
+  /** Human-readable label (e.g., "Expected Revenue") */
+  field_label: string;
+  /** Field type (e.g., "monetary", "many2one", "char") */
+  field_type: string;
+  /** Model this field belongs to (e.g., "crm.lead") */
+  model_name: string;
+  /** Model ID */
+  model_id: number;
+  /** Field ID */
+  field_id: number;
+  /** True if this is a foreign key field */
+  is_foreign_key: boolean;
+  /** Target model for FK fields (e.g., "res.partner") */
+  target_model?: string;
+}
+
+/**
+ * Coordinate lookup map: "model_id^field_id" → CoordinateMetadata
+ *
+ * This is the NEXUS schema dictionary that enables decoding.
+ * Built from 17,930 schema entries on first use.
+ */
+export type CoordinateLookupMap = Map<string, CoordinateMetadata>;
+
+/**
+ * Parsed field from NEXUS encoded string
+ *
+ * Represents a single segment like "344^6299*450000" parsed into components.
+ */
+export interface ParsedField {
+  /** The coordinate portion (e.g., "344^6299") */
+  coordinate: string;
+  /** Model ID extracted from coordinate */
+  model_id: number;
+  /** Field ID extracted from coordinate */
+  field_id: number;
+  /** The value portion (e.g., "450000") */
+  raw_value: string;
+}
+
+/**
+ * Decoded field with human-readable display value
+ *
+ * The final output of the NEXUS decoder - ready for display to users.
+ */
+export interface DecodedField {
+  /** Technical field name */
+  field_name: string;
+  /** Human-readable label */
+  field_label: string;
+  /** Field type */
+  field_type: string;
+  /** Original raw value from encoding */
+  raw_value: string;
+  /** Formatted display value (e.g., "$450,000" or "#201 (res.partner)") */
+  display_value: string;
+  /** True if this is a foreign key field */
+  is_foreign_key: boolean;
+  /** Target model for FK fields */
+  target_model?: string;
+}
+
+// =============================================================================
+// NEXUS ANALYTICS TYPES (Self-Improving System)
+// =============================================================================
+
+/**
+ * Field usage tracking record
+ *
+ * Tracks how often each field is decoded or appears in search results.
+ * Used to discover which fields are most important to users.
+ */
+export interface FieldUsageRecord {
+  /** Model name (e.g., "crm.lead") */
+  model_name: string;
+  /** Field name (e.g., "expected_revenue") */
+  field_name: string;
+  /** Coordinate string (e.g., "344^6299") */
+  coordinate: string;
+  /** Number of times this field was decoded in results */
+  decode_count: number;
+  /** Number of times this field appeared in search results */
+  search_count: number;
+  /** Last time this field was used (ISO timestamp) */
+  last_used: string;
+}
+
+/**
+ * Field importance score (calculated from usage)
+ *
+ * Used to determine which fields should be promoted to key fields.
+ */
+export interface FieldImportanceScore {
+  /** Model name */
+  model_name: string;
+  /** Field name */
+  field_name: string;
+  /** Calculated importance score (0-100) */
+  total_score: number;
+  /** Decode frequency contribution */
+  decode_frequency: number;
+  /** Search frequency contribution */
+  search_frequency: number;
+  /** True if this field should be promoted to key fields */
+  is_promoted: boolean;
+}
+
+/**
+ * Persisted analytics data
+ *
+ * Stored in data/analytics.json for persistence across restarts.
+ */
+export interface AnalyticsData {
+  /** Data format version */
+  version: number;
+  /** Schema hash - analytics cleared if schema changes */
+  schema_hash: string;
+  /** When analytics data was created */
+  created_at: string;
+  /** Last update timestamp */
+  updated_at: string;
+  /** Field usage records keyed by "model.field" */
+  field_usage: Record<string, FieldUsageRecord>;
+  /** Total number of decode operations */
+  total_decodes: number;
+  /** Total number of searches */
+  total_searches: number;
+}
+
+/**
+ * Analytics summary for display
+ *
+ * Returned by getAnalyticsSummary() for showing in sync status.
+ */
+export interface AnalyticsSummary {
+  /** Total decode operations */
+  total_decodes: number;
+  /** Total searches */
+  total_searches: number;
+  /** Top decoded fields by count */
+  top_fields: Array<{ field: string; count: number }>;
+  /** Fields suggested for promotion to key fields */
+  suggested_promotions: string[];
+  /** How long analytics has been collecting (hours) */
+  data_age_hours: number;
+}
+
+// =============================================================================
+// NEXUS TRAINING DATA TYPES (Phase 2 Preparation)
+// =============================================================================
+
+/**
+ * Training data pair: NEXUS encoded → human readable
+ *
+ * These pairs are collected during decode operations and can be
+ * exported for Phase 2 model training on the NEXUS language.
+ */
+export interface TrainingPair {
+  /** NEXUS encoded input (e.g., "344^6271*Westfield|344^6299*450000") */
+  input: string;
+  /** Human-readable output (e.g., "Name: Westfield | Revenue: $450,000") */
+  output: string;
+  /** Model name for context */
+  model_name: string;
+  /** When this pair was recorded */
+  timestamp: string;
+}
+
+/**
+ * Training data statistics
+ */
+export interface TrainingStats {
+  /** Total training pairs collected */
+  total_pairs: number;
+  /** Pairs by model name */
+  by_model: Record<string, number>;
+  /** Oldest pair timestamp */
+  oldest: string | null;
+  /** Newest pair timestamp */
+  newest: string | null;
+}

@@ -24,6 +24,15 @@ import { registerSearchTools } from './tools/search-tool.js';
 import { registerDataTools } from './tools/data-tool.js';
 import { initializeEmbeddingService } from './services/embedding-service.js';
 import { initializeVectorClient } from './services/vector-client.js';
+import { getSchemaStats } from './services/schema-loader.js';
+import {
+  initializeAnalytics,
+  initializeTrainingData,
+  shutdownAnalytics,
+  shutdownTrainingData,
+  persistAnalytics,
+  persistTrainingData,
+} from './services/analytics-service.js';
 
 // =============================================================================
 // CONFIGURATION
@@ -156,14 +165,57 @@ async function initializeServices(): Promise<void> {
     console.error('[Init] Vector client ready');
   }
 
+  // 3. Initialize NEXUS Analytics (Self-Improving System)
+  // Creates a schema hash based on field count to detect changes
+  try {
+    const stats = getSchemaStats();
+    const schemaHash = `v1-${stats.totalFields}-${stats.models}`;
+    initializeAnalytics(schemaHash);
+    console.error(`[Init] NEXUS Analytics initialized (schema hash: ${schemaHash})`);
+  } catch (err) {
+    console.error('[Init] Analytics init skipped - schema not loaded yet');
+  }
+
+  // 4. Initialize Training Data Collection (Phase 2 Preparation)
+  initializeTrainingData();
+  console.error('[Init] Training data collection initialized');
+
   // Note: Schema collection is initialized via the 'sync' tool
   // Use sync with action="full_sync" to upload schema data
   console.error('[Init] Use sync tool with action="full_sync" to upload schema');
 }
 
 // =============================================================================
+// SHUTDOWN HANDLERS
+// =============================================================================
+
+/**
+ * Graceful shutdown handler
+ * Persists analytics and training data before exit
+ */
+function setupShutdownHandlers(): void {
+  const shutdown = () => {
+    console.error('[Shutdown] Persisting analytics and training data...');
+    shutdownAnalytics();
+    shutdownTrainingData();
+    process.exit(0);
+  };
+
+  // Handle various shutdown signals
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  process.on('beforeExit', () => {
+    persistAnalytics();
+    persistTrainingData();
+  });
+}
+
+// =============================================================================
 // ENTRY POINT
 // =============================================================================
+
+// Setup shutdown handlers for graceful persistence
+setupShutdownHandlers();
 
 if (TRANSPORT === 'http') {
   runHttp().catch((error) => {
