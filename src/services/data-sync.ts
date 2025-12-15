@@ -104,6 +104,10 @@ export async function fetchAllRecords(
     allRecords.push(...batch);
     offset += batch.length;
 
+    // Log progress every batch
+    const pct = Math.round((allRecords.length / total) * 100);
+    console.error(`[DataSync] Fetched ${allRecords.length}/${total} records (${pct}%)`);
+
     if (onProgress) {
       onProgress(allRecords.length, total);
     }
@@ -168,14 +172,11 @@ async function ensureDataIndexes(): Promise<void> {
 export type ProgressCallback = (phase: string, current: number, total: number) => void;
 
 /**
- * Sync model data to Qdrant
+ * Sync model data to Qdrant using STREAMING approach
  *
- * This is the main orchestration function that:
- * 1. Validates schema-data alignment
- * 2. Fetches all records from Odoo
- * 3. Encodes records into coordinate format
- * 4. Generates embeddings
- * 5. Upserts to Qdrant
+ * IMPORTANT: Uses streaming to avoid memory issues with large tables.
+ * Each batch is: Fetch → Encode → Embed → Upsert → Clear
+ * This keeps memory usage constant regardless of table size.
  *
  * @param config - Transform configuration
  * @param onProgress - Progress callback
@@ -233,14 +234,12 @@ export async function syncModelData(
 
     console.error(`[DataSync] Found ${schemaFields.length} schema fields for ${config.model_name}`);
     const encodingMap = buildFieldEncodingMap(schemaFields);
+    const fieldsToFetch = getFieldsToFetch(encodingMap);
 
     // Phase 2: Fetch sample record and validate schema alignment
     onProgress?.('validating', 0, 1);
     console.error(`[DataSync] Validating schema-data alignment`);
 
-    const fieldsToFetch = getFieldsToFetch(encodingMap);
-
-    // Fetch first record to validate fields
     const sampleRecords = await fetchAllRecords(
       { ...config, test_limit: 1 },
       fieldsToFetch
@@ -272,7 +271,7 @@ export async function syncModelData(
         duration_ms: Date.now() - startTime,
         errors: [
           `Schema-Data mismatch! ${validation.missing_in_schema.length} Odoo fields not in schema:`,
-          ...validation.missing_in_schema.slice(0, 20), // Show first 20
+          ...validation.missing_in_schema.slice(0, 20),
           validation.missing_in_schema.length > 20
             ? `... and ${validation.missing_in_schema.length - 20} more`
             : '',
@@ -284,76 +283,109 @@ export async function syncModelData(
 
     console.error(`[DataSync] Schema validation passed: ${validation.matched_fields.length} fields matched`);
 
-    // Phase 3: Fetch all records
-    onProgress?.('fetching', 0, 1);
-    console.error(`[DataSync] Fetching all records from Odoo`);
-
-    const records = await fetchAllRecords(config, fieldsToFetch, (cur, tot) => {
-      onProgress?.('fetching', cur, tot);
-    });
-
-    console.error(`[DataSync] Fetched ${records.length} records`);
-
-    // Phase 4: Transform records to encoded strings
-    onProgress?.('encoding', 0, records.length);
-    console.error(`[DataSync] Encoding records`);
-
-    const encodedRecords = transformRecords(records, encodingMap, config);
-
-    console.error(`[DataSync] Encoded ${encodedRecords.length} records`);
-
-    // Phase 5: Generate embeddings and upsert in batches
-    const embedBatchSize = DATA_TRANSFORM_CONFIG.EMBED_BATCH_SIZE;
-    let totalEmbedded = 0;
-
     // Ensure indexes exist for data points
     await ensureDataIndexes();
 
-    for (let i = 0; i < encodedRecords.length; i += embedBatchSize) {
-      const batch = encodedRecords.slice(i, i + embedBatchSize);
+    // Phase 3: STREAMING - Fetch, encode, embed, upsert in batches
+    // This avoids loading all records into memory at once
+    const client = getOdooClient();
+    const fetchBatchSize = DATA_TRANSFORM_CONFIG.FETCH_BATCH_SIZE;
+    const embedBatchSize = DATA_TRANSFORM_CONFIG.EMBED_BATCH_SIZE;
 
-      onProgress?.('embedding', i, encodedRecords.length);
-
-      try {
-        // Generate embeddings for encoded strings
-        const texts = batch.map(r => r.encoded_string);
-        const embeddings = await embedBatch(texts, 'document');
-
-        // Build data points for upsert
-        const points: DataPoint[] = batch.map((record, idx) => ({
-          id: generateDataPointId(record.model_id, record.record_id),
-          vector: embeddings[idx],
-          payload: {
-            record_id: record.record_id,
-            model_name: record.model_name,
-            model_id: record.model_id,
-            encoded_string: record.encoded_string,
-            field_count: record.field_count,
-            sync_timestamp: new Date().toISOString(),
-            point_type: 'data' as const,
-          } as DataPayload,
-        }));
-
-        // Upsert to Qdrant
-        await upsertDataPoints(points);
-        totalEmbedded += batch.length;
-
-        console.error(`[DataSync] Embedded and upserted batch ${i / embedBatchSize + 1}: ${batch.length} records`);
-      } catch (error) {
-        const errMsg = error instanceof Error ? error.message : String(error);
-        errors.push(`Batch ${i / embedBatchSize + 1} failed: ${errMsg}`);
-        console.error(`[DataSync] Batch error:`, errMsg);
-      }
+    // Build domain filter
+    const domain: unknown[] = [];
+    const context: Record<string, unknown> = {};
+    if (config.include_archived !== false) {
+      context.active_test = false;
     }
 
-    onProgress?.('complete', encodedRecords.length, encodedRecords.length);
+    // Get total count
+    const totalRecords = config.test_limit
+      ? Math.min(config.test_limit, await client.searchCount(config.model_name, domain, context))
+      : await client.searchCount(config.model_name, domain, context);
+
+    console.error(`[DataSync] Starting streaming sync of ${totalRecords} records`);
+    onProgress?.('streaming', 0, totalRecords);
+
+    let offset = 0;
+    let totalProcessed = 0;
+    let totalEmbedded = 0;
+    const maxRecords = config.test_limit || totalRecords;
+
+    while (offset < maxRecords) {
+      const limit = Math.min(fetchBatchSize, maxRecords - offset);
+
+      // Step 1: Fetch batch from Odoo
+      const batch = await client.searchRead<Record<string, unknown>>(
+        config.model_name,
+        domain,
+        fieldsToFetch,
+        { limit, offset, order: 'id', context }
+      );
+
+      if (batch.length === 0) break;
+
+      totalProcessed += batch.length;
+      const fetchPct = Math.round((totalProcessed / totalRecords) * 100);
+      console.error(`[DataSync] Fetched batch: ${totalProcessed}/${totalRecords} records (${fetchPct}%)`);
+
+      // Step 2: Encode batch
+      const encodedBatch = transformRecords(batch, encodingMap, config);
+
+      // Step 3: Embed and upsert in smaller chunks
+      for (let i = 0; i < encodedBatch.length; i += embedBatchSize) {
+        const embedChunk = encodedBatch.slice(i, i + embedBatchSize);
+
+        try {
+          // Generate embeddings
+          const texts = embedChunk.map(r => r.encoded_string);
+          const embeddings = await embedBatch(texts, 'document');
+
+          // Build data points
+          const points: DataPoint[] = embedChunk.map((record, idx) => ({
+            id: generateDataPointId(record.model_id, record.record_id),
+            vector: embeddings[idx],
+            payload: {
+              record_id: record.record_id,
+              model_name: record.model_name,
+              model_id: record.model_id,
+              encoded_string: record.encoded_string,
+              field_count: record.field_count,
+              sync_timestamp: new Date().toISOString(),
+              point_type: 'data' as const,
+            } as DataPayload,
+          }));
+
+          // Upsert to Qdrant
+          await upsertDataPoints(points);
+          totalEmbedded += embedChunk.length;
+
+          const embedPct = Math.round((totalEmbedded / totalRecords) * 100);
+          console.error(`[DataSync] Embedded: ${totalEmbedded}/${totalRecords} records (${embedPct}%)`);
+
+          onProgress?.('embedding', totalEmbedded, totalRecords);
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : String(error);
+          errors.push(`Embed batch at offset ${offset + i} failed: ${errMsg}`);
+          console.error(`[DataSync] Embed error:`, errMsg);
+        }
+      }
+
+      offset += batch.length;
+
+      // Break if we got fewer records than requested
+      if (batch.length < limit) break;
+    }
+
+    onProgress?.('complete', totalEmbedded, totalRecords);
+    console.error(`[DataSync] Complete: ${totalEmbedded}/${totalProcessed} records embedded`);
 
     return {
       success: errors.length === 0,
       model_name: config.model_name,
-      records_processed: records.length,
+      records_processed: totalProcessed,
       records_embedded: totalEmbedded,
-      records_failed: records.length - totalEmbedded,
+      records_failed: totalProcessed - totalEmbedded,
       duration_ms: Date.now() - startTime,
       errors: errors.length > 0 ? errors : undefined,
     };
