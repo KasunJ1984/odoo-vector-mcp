@@ -13,8 +13,18 @@ import xmlrpc from 'xmlrpc';
 const { createClient, createSecureClient } = xmlrpc;
 type Client = ReturnType<typeof createClient>;
 
-import type { OdooConfig, CrmLead } from '../types.js';
+import type {
+  OdooConfig,
+  CrmLead,
+  ResilientSearchResult,
+  ResilientSearchConfig,
+  FieldRestrictionReason,
+} from '../types.js';
 import { ODOO_CONFIG } from '../constants.js';
+import {
+  parseOdooError,
+  isFieldRestrictionError,
+} from '../utils/odoo-error-parser.js';
 
 // Timeout for API calls (30 seconds)
 const API_TIMEOUT = 30000;
@@ -220,6 +230,115 @@ export class OdooClient {
         }
       );
     });
+  }
+
+  /**
+   * Search and read with automatic retry on field restriction errors
+   *
+   * When Odoo returns security restriction or compute errors for specific fields,
+   * this method automatically:
+   * 1. Parses the error to extract restricted field names
+   * 2. Removes those fields from the request
+   * 3. Retries the request (up to maxRetries times)
+   * 4. Returns both the records AND the list of restricted fields
+   *
+   * @param model - Odoo model name (e.g., 'res.partner')
+   * @param domain - Search domain filters
+   * @param fields - Fields to fetch (will be reduced if restrictions found)
+   * @param options - Standard searchRead options (limit, offset, order, context)
+   * @param config - Retry configuration
+   * @returns Records and metadata about restricted fields
+   */
+  async searchReadWithRetry<T>(
+    model: string,
+    domain: unknown[],
+    fields: string[],
+    options: { limit?: number; offset?: number; order?: string; context?: Record<string, unknown> } = {},
+    config: ResilientSearchConfig = {}
+  ): Promise<ResilientSearchResult<T>> {
+    const maxRetries = config.maxRetries ?? 5;
+    const onFieldRestricted = config.onFieldRestricted;
+
+    let currentFields = [...fields];
+    const restrictedFields: string[] = [];
+    const warnings: string[] = [];
+    let retryCount = 0;
+
+    while (retryCount <= maxRetries) {
+      try {
+        // Attempt the search_read
+        const records = await this.searchRead<T>(model, domain, currentFields, options);
+
+        // Success! Return results
+        return {
+          records,
+          restrictedFields,
+          retryCount,
+          warnings,
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+
+        // Check if this is a field restriction error we can handle
+        if (!isFieldRestrictionError(errorMessage)) {
+          // Not a field restriction error - re-throw
+          throw error;
+        }
+
+        // Parse the error to extract restricted field names
+        const parsed = parseOdooError(errorMessage);
+
+        if (parsed.restrictedFields.length === 0) {
+          // Couldn't extract field names - re-throw original error
+          warnings.push(`Could not parse restricted fields from error: ${errorMessage}`);
+          throw error;
+        }
+
+        // Determine restriction reason
+        const reason: FieldRestrictionReason = parsed.type === 'compute_error'
+          ? 'compute_error'
+          : parsed.type === 'security_restriction'
+            ? 'security_restriction'
+            : 'unknown';
+
+        // Remove restricted fields and retry
+        for (const fieldName of parsed.restrictedFields) {
+          if (currentFields.includes(fieldName)) {
+            currentFields = currentFields.filter(f => f !== fieldName);
+            restrictedFields.push(fieldName);
+
+            const warning = `[${model}] Field '${fieldName}' restricted (${reason}) - removed from query`;
+            warnings.push(warning);
+            console.error(warning);
+
+            // Notify callback if provided
+            if (onFieldRestricted) {
+              onFieldRestricted(fieldName, reason);
+            }
+          }
+        }
+
+        // Check if we have any fields left
+        if (currentFields.length === 0) {
+          throw new Error(`All fields are restricted for model ${model}. Cannot proceed with sync.`);
+        }
+
+        retryCount++;
+
+        if (retryCount > maxRetries) {
+          throw new Error(
+            `Max retries (${maxRetries}) exceeded for ${model}. ` +
+            `Restricted fields: ${restrictedFields.join(', ')}`
+          );
+        }
+
+        // Continue to next iteration with reduced field list
+        console.error(`[${model}] Retrying with ${currentFields.length} fields (attempt ${retryCount}/${maxRetries})`);
+      }
+    }
+
+    // Should not reach here, but TypeScript needs this
+    throw new Error(`Unexpected end of retry loop for ${model}`);
   }
 }
 

@@ -26,9 +26,13 @@ import { DATA_TRANSFORM_CONFIG, QDRANT_CONFIG } from '../constants.js';
 import type {
   DataTransformConfig,
   DataSyncResult,
+  DataSyncResultWithRestrictions,
   DataPoint,
   DataPayload,
   ValidationResult,
+  FieldRestriction,
+  FieldRestrictionReason,
+  EncodingContext,
 } from '../types.js';
 
 // =============================================================================
@@ -280,16 +284,29 @@ export type ProgressCallback = (phase: string, current: number, total: number) =
  * Each batch is: Fetch → Encode → Embed → Upsert → Clear
  * This keeps memory usage constant regardless of table size.
  *
+ * **RESILIENT FIELD HANDLING:**
+ * When API permissions restrict access to certain fields, the sync continues
+ * gracefully by:
+ * 1. Detecting restricted fields from error messages
+ * 2. Removing them from the query
+ * 3. Encoding them as "Restricted_from_API"
+ * 4. Reporting which fields were restricted in the result
+ *
  * @param config - Transform configuration
  * @param onProgress - Progress callback
- * @returns Sync result
+ * @returns Sync result with restriction information
  */
 export async function syncModelData(
   config: DataTransformConfig,
   onProgress?: ProgressCallback
-): Promise<DataSyncResult> {
+): Promise<DataSyncResultWithRestrictions> {
   const startTime = Date.now();
   const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // Track restricted fields discovered during sync
+  const restrictedFieldsMap = new Map<string, FieldRestrictionReason>();
+  const restrictedFieldsSet = new Set<string>();
 
   // Validate services are available
   if (!isEmbeddingServiceAvailable()) {
@@ -301,6 +318,8 @@ export async function syncModelData(
       records_failed: 0,
       duration_ms: Date.now() - startTime,
       errors: ['Embedding service not available. Set VOYAGE_API_KEY.'],
+      restricted_fields: [],
+      warnings: [],
     };
   }
 
@@ -313,10 +332,15 @@ export async function syncModelData(
       records_failed: 0,
       duration_ms: Date.now() - startTime,
       errors: ['Vector client not available. Check QDRANT_HOST.'],
+      restricted_fields: [],
+      warnings: [],
     };
   }
 
   try {
+    // Get Odoo client
+    const client = getOdooClient();
+
     // Phase 1: Load schema and build encoding map
     onProgress?.('loading_schema', 0, 1);
     console.error(`[DataSync] Loading schema for ${config.model_name}`);
@@ -331,6 +355,8 @@ export async function syncModelData(
         records_failed: 0,
         duration_ms: Date.now() - startTime,
         errors: [`No schema found for model: ${config.model_name}`],
+        restricted_fields: [],
+        warnings: [],
       };
     }
 
@@ -338,16 +364,43 @@ export async function syncModelData(
     const encodingMap = buildFieldEncodingMap(schemaFields);
     const fieldsToFetch = getFieldsToFetch(encodingMap);
 
-    // Phase 2: Fetch sample record and validate schema alignment
+    // Phase 2: Fetch sample record with resilient handling and validate schema alignment
     onProgress?.('validating', 0, 1);
-    console.error(`[DataSync] Validating schema-data alignment`);
+    console.error(`[DataSync] Validating schema-data alignment (with resilient field handling)`);
 
-    const sampleRecords = await fetchAllRecords(
-      { ...config, test_limit: 1 },
-      fieldsToFetch
+    // Track fields we'll actually fetch (may be reduced if some are restricted)
+    let currentFieldsToFetch = [...fieldsToFetch];
+
+    // Build domain and context for queries
+    const domain: unknown[] = [];
+    const context: Record<string, unknown> = {};
+    if (config.include_archived !== false) {
+      context.active_test = false;
+    }
+
+    // Use resilient fetch for sample record to discover any restricted fields
+    const sampleResult = await client.searchReadWithRetry<Record<string, unknown>>(
+      config.model_name,
+      domain,
+      currentFieldsToFetch,
+      { limit: 1, context },
+      {
+        maxRetries: 5,
+        onFieldRestricted: (field, reason) => {
+          restrictedFieldsMap.set(field, reason);
+          restrictedFieldsSet.add(field);
+          warnings.push(`Field '${field}' restricted (${reason}) - will be marked as Restricted_from_API`);
+        },
+      }
     );
 
-    if (sampleRecords.length === 0) {
+    // Update field list with any restrictions found during sample fetch
+    if (sampleResult.restrictedFields.length > 0) {
+      currentFieldsToFetch = currentFieldsToFetch.filter(f => !restrictedFieldsSet.has(f));
+      console.error(`[DataSync] Found ${sampleResult.restrictedFields.length} restricted fields during sample fetch`);
+    }
+
+    if (sampleResult.records.length === 0) {
       return {
         success: false,
         model_name: config.model_name,
@@ -356,11 +409,13 @@ export async function syncModelData(
         records_failed: 0,
         duration_ms: Date.now() - startTime,
         errors: [`No records found for model: ${config.model_name}`],
+        restricted_fields: [],
+        warnings,
       };
     }
 
-    // Validate schema-data alignment
-    const odooFields = Object.keys(sampleRecords[0]);
+    // Validate schema-data alignment (with remaining fields)
+    const odooFields = Object.keys(sampleResult.records[0]);
     const validation: ValidationResult = validateSchemaDataAlignment(odooFields, schemaFields);
 
     if (!validation.valid) {
@@ -380,26 +435,26 @@ export async function syncModelData(
           '',
           'Please update schema first (sync schema), then retry data sync.',
         ].filter(Boolean),
+        restricted_fields: [],
+        warnings,
       };
     }
 
     console.error(`[DataSync] Schema validation passed: ${validation.matched_fields.length} fields matched`);
+
+    // Build encoding context with restricted fields
+    const encodingContext: EncodingContext = {
+      model_name: config.model_name,
+      restricted_fields: restrictedFieldsSet,
+    };
 
     // Ensure indexes exist for data points
     await ensureDataIndexes();
 
     // Phase 3: STREAMING - Fetch, encode, embed, upsert in batches
     // This avoids loading all records into memory at once
-    const client = getOdooClient();
     const fetchBatchSize = DATA_TRANSFORM_CONFIG.FETCH_BATCH_SIZE;
     const embedBatchSize = DATA_TRANSFORM_CONFIG.EMBED_BATCH_SIZE;
-
-    // Build domain filter
-    const domain: unknown[] = [];
-    const context: Record<string, unknown> = {};
-    if (config.include_archived !== false) {
-      context.active_test = false;
-    }
 
     // Get total count
     const totalRecords = config.test_limit
@@ -407,6 +462,9 @@ export async function syncModelData(
       : await client.searchCount(config.model_name, domain, context);
 
     console.error(`[DataSync] Starting streaming sync of ${totalRecords} records`);
+    if (restrictedFieldsSet.size > 0) {
+      console.error(`[DataSync] Excluding ${restrictedFieldsSet.size} restricted fields from fetch`);
+    }
     onProgress?.('streaming', 0, totalRecords);
 
     let offset = 0;
@@ -417,22 +475,42 @@ export async function syncModelData(
     while (offset < maxRecords) {
       const limit = Math.min(fetchBatchSize, maxRecords - offset);
 
-      // Step 1: Fetch batch from Odoo
-      const batch = await client.searchRead<Record<string, unknown>>(
+      // Step 1: Fetch batch from Odoo with resilient handling
+      const batchResult = await client.searchReadWithRetry<Record<string, unknown>>(
         config.model_name,
         domain,
-        fieldsToFetch,
-        { limit, offset, order: 'id', context }
+        currentFieldsToFetch,
+        { limit, offset, order: 'id', context },
+        {
+          maxRetries: 5,
+          onFieldRestricted: (field, reason) => {
+            // New restriction found during batch - add to tracking
+            if (!restrictedFieldsSet.has(field)) {
+              restrictedFieldsMap.set(field, reason);
+              restrictedFieldsSet.add(field);
+              warnings.push(`Field '${field}' restricted (${reason}) - discovered during batch at offset ${offset}`);
+              console.error(`[DataSync] New restricted field discovered: ${field} (${reason})`);
+            }
+          },
+        }
       );
 
+      // Update field list if new restrictions found
+      if (batchResult.restrictedFields.some(f => !currentFieldsToFetch.includes(f) === false)) {
+        currentFieldsToFetch = currentFieldsToFetch.filter(f => !restrictedFieldsSet.has(f));
+        // Update encoding context with new restrictions
+        encodingContext.restricted_fields = restrictedFieldsSet;
+      }
+
+      const batch = batchResult.records;
       if (batch.length === 0) break;
 
       totalProcessed += batch.length;
       const fetchPct = Math.round((totalProcessed / totalRecords) * 100);
       console.error(`[DataSync] Fetched batch: ${totalProcessed}/${totalRecords} records (${fetchPct}%)`);
 
-      // Step 2: Encode batch
-      const encodedBatch = transformRecords(batch, encodingMap, config);
+      // Step 2: Encode batch with restricted field markers
+      const encodedBatch = transformRecords(batch, encodingMap, config, encodingContext);
 
       // Step 3: Embed and upsert in smaller chunks
       for (let i = 0; i < encodedBatch.length; i += embedBatchSize) {
@@ -482,6 +560,19 @@ export async function syncModelData(
     onProgress?.('complete', totalEmbedded, totalRecords);
     console.error(`[DataSync] Complete: ${totalEmbedded}/${totalProcessed} records embedded`);
 
+    if (restrictedFieldsSet.size > 0) {
+      console.error(`[DataSync] Restricted fields (${restrictedFieldsSet.size}): ${Array.from(restrictedFieldsSet).join(', ')}`);
+    }
+
+    // Build restricted fields array for result
+    const restrictedFieldsResult: FieldRestriction[] = Array.from(restrictedFieldsMap.entries()).map(
+      ([field_name, reason]) => ({
+        field_name,
+        reason,
+        detected_at: new Date().toISOString(),
+      })
+    );
+
     return {
       success: errors.length === 0,
       model_name: config.model_name,
@@ -490,9 +581,21 @@ export async function syncModelData(
       records_failed: totalProcessed - totalEmbedded,
       duration_ms: Date.now() - startTime,
       errors: errors.length > 0 ? errors : undefined,
+      restricted_fields: restrictedFieldsResult,
+      warnings,
     };
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
+
+    // Build restricted fields array even on error
+    const restrictedFieldsResult: FieldRestriction[] = Array.from(restrictedFieldsMap.entries()).map(
+      ([field_name, reason]) => ({
+        field_name,
+        reason,
+        detected_at: new Date().toISOString(),
+      })
+    );
+
     return {
       success: false,
       model_name: config.model_name,
@@ -501,6 +604,8 @@ export async function syncModelData(
       records_failed: 0,
       duration_ms: Date.now() - startTime,
       errors: [errMsg],
+      restricted_fields: restrictedFieldsResult,
+      warnings,
     };
   }
 }

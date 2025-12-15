@@ -378,6 +378,83 @@ export interface DataSyncResult {
   errors?: string[];
 }
 
+// =============================================================================
+// API RESTRICTION HANDLING TYPES
+// =============================================================================
+
+/**
+ * Reason why a field is restricted from API access
+ */
+export type FieldRestrictionReason = 'security_restriction' | 'compute_error' | 'unknown';
+
+/**
+ * Information about a restricted field
+ *
+ * Tracks fields that couldn't be read due to API permissions.
+ * These fields are marked as "Restricted_from_API" in the encoded output.
+ */
+export interface FieldRestriction {
+  /** Field name that was restricted */
+  field_name: string;
+  /** Reason for the restriction */
+  reason: FieldRestrictionReason;
+  /** When the restriction was detected (ISO timestamp) */
+  detected_at: string;
+}
+
+/**
+ * Context passed through the encoding pipeline
+ *
+ * Tracks which fields are restricted for the current sync operation.
+ * Used by the encoder to mark restricted fields appropriately.
+ */
+export interface EncodingContext {
+  /** Model being encoded */
+  model_name: string;
+  /** Set of field names that couldn't be fetched due to restrictions */
+  restricted_fields: Set<string>;
+}
+
+/**
+ * Extended DataSyncResult with API restriction information
+ *
+ * Used when syncing models that have some fields restricted.
+ * The sync can still succeed with partial field data.
+ */
+export interface DataSyncResultWithRestrictions extends DataSyncResult {
+  /** Fields that were restricted and excluded from sync */
+  restricted_fields: FieldRestriction[];
+  /** Warning messages about restrictions */
+  warnings: string[];
+}
+
+/**
+ * Result of a resilient search-read operation
+ *
+ * Returned by searchReadWithRetry when it successfully handles
+ * field restrictions through automatic retry.
+ */
+export interface ResilientSearchResult<T> {
+  /** Records fetched from Odoo */
+  records: T[];
+  /** Fields that were removed due to restrictions */
+  restrictedFields: string[];
+  /** Number of retries needed to succeed */
+  retryCount: number;
+  /** Warning messages generated during retries */
+  warnings: string[];
+}
+
+/**
+ * Configuration for resilient search-read operation
+ */
+export interface ResilientSearchConfig {
+  /** Maximum number of retries (default: 5) */
+  maxRetries?: number;
+  /** Optional callback when a field is found to be restricted */
+  onFieldRestricted?: (field: string, reason: FieldRestrictionReason) => void;
+}
+
 /**
  * Schema-Data validation result
  *

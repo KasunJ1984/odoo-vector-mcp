@@ -146,6 +146,29 @@ Run schema sync first if needed.
           if (result.records_failed > 0) {
             lines.push(`Records Failed: ${result.records_failed}`);
           }
+
+          // Show restricted fields if any
+          if (result.restricted_fields && result.restricted_fields.length > 0) {
+            lines.push(``);
+            lines.push(`API Restrictions (${result.restricted_fields.length} fields):`);
+            lines.push(`----------------------------------------`);
+
+            // Group by reason
+            const byReason = new Map<string, string[]>();
+            for (const field of result.restricted_fields) {
+              const list = byReason.get(field.reason) || [];
+              list.push(field.field_name);
+              byReason.set(field.reason, list);
+            }
+
+            for (const [reason, fields] of byReason) {
+              lines.push(`${reason}: ${fields.join(', ')}`);
+            }
+
+            lines.push(``);
+            lines.push(`NOTE: Restricted fields are encoded as "Restricted_from_API"`);
+            lines.push(`in the vector database. They will decode as "[API Restricted]".`);
+          }
         } else {
           lines.push(`Data Sync FAILED`);
           lines.push(`=================`);
@@ -157,6 +180,27 @@ Run schema sync first if needed.
             for (const error of result.errors) {
               lines.push(`  - ${error}`);
             }
+          }
+
+          // Show restricted fields even on failure (might help debugging)
+          if (result.restricted_fields && result.restricted_fields.length > 0) {
+            lines.push(``);
+            lines.push(`Restricted Fields Found (${result.restricted_fields.length}):`);
+            for (const field of result.restricted_fields) {
+              lines.push(`  - ${field.field_name} (${field.reason})`);
+            }
+          }
+        }
+
+        // Show warnings if any
+        if (result.warnings && result.warnings.length > 0) {
+          lines.push(``);
+          lines.push(`Warnings:`);
+          for (const warning of result.warnings.slice(0, 10)) {
+            lines.push(`  - ${warning}`);
+          }
+          if (result.warnings.length > 10) {
+            lines.push(`  ... and ${result.warnings.length - 10} more warnings`);
           }
         }
 

@@ -115,13 +115,19 @@ src/
 ├── constants.ts             # Schema definitions (23 codes)
 ├── schemas/index.ts         # Zod validation
 ├── services/
-│   ├── odoo-client.ts       # Odoo XML-RPC
+│   ├── odoo-client.ts       # Odoo XML-RPC (with resilient retry)
 │   ├── embedding-service.ts # Voyage AI
 │   ├── vector-client.ts     # Qdrant
 │   ├── schema-service.ts    # Schema collection
-│   ├── encoder-service.ts   # Encode/decode
-│   └── sync-service.ts      # Odoo → Qdrant
-└── tools/vector-tools.ts    # 4 MCP tools
+│   ├── schema-loader.ts     # Load schema from Qdrant
+│   ├── data-transformer.ts  # Encode/decode with restriction handling
+│   ├── data-sync.ts         # Odoo → Qdrant with streaming
+│   └── sync-service.ts      # Legacy sync service
+├── utils/
+│   └── odoo-error-parser.ts # Parse Odoo security errors
+└── tools/
+    ├── vector-tools.ts      # Search & decode tools
+    └── data-tool.ts         # Data sync tools
 ```
 
 ## Schema Codes (MVP: 23 fields)
@@ -176,3 +182,86 @@ src/
 
 4. **Keep data fresh**: Sync from Odoo
    → Use `vector_sync` with action="full_sync"
+
+## Dynamic Model Data Sync
+
+The `transform_data` tool supports syncing ANY Odoo model to the vector database.
+
+**Command Format:** `transfer_[model.name]_1984`
+
+**Examples:**
+- `transfer_crm.lead_1984` → Sync CRM leads
+- `transfer_res.partner_1984` → Sync contacts/partners
+- `transfer_product.template_1984` → Sync products
+- `transfer_sale.order_1984` → Sync sales orders
+
+**How it works:**
+1. Extracts model name from command
+2. Discovers model_id and fields from schema automatically
+3. Validates all fields exist in schema
+4. Fetches records using streaming (memory-efficient)
+5. Encodes and embeds each record
+6. Uploads to vector database with `point_type: "data"`
+
+## Graceful API Restriction Handling
+
+When syncing certain Odoo models (e.g., `res.partner`, `product.template`), the API user may lack permission to read specific fields. Instead of failing completely, the system now handles these gracefully.
+
+### How It Works
+
+1. **Detection**: When Odoo returns a security error, the error message is parsed to extract restricted field names
+2. **Retry**: The query is retried without the restricted fields (up to 5 attempts)
+3. **Encoding**: Restricted fields are encoded as `Restricted_from_API` instead of actual values
+4. **Decoding**: When decoded, restricted fields display as `[API Restricted]`
+
+### Supported Error Patterns
+
+**Pattern 1 - Security Restriction:**
+```
+The requested operation can not be completed due to security restrictions.
+Document type: Contact (res.partner)
+Operation: read
+Fields:
+- slide_channel_count (allowed for groups 'eLearning / Officer')
+- slide_channel_ids (allowed for groups 'eLearning / Officer')
+```
+
+**Pattern 2 - Compute Error:**
+```
+ValueError: Compute method failed to assign product.template(6952,).po_ids
+```
+
+### Example Output
+
+```
+Data Sync Complete
+===================
+Model: res.partner
+Records Processed: 1500
+Records Embedded: 1500
+Duration: 45.3s
+
+API Restrictions (4 fields):
+----------------------------------------
+security_restriction: slide_channel_count, slide_channel_ids, slide_channel_company_count, karma
+
+NOTE: Restricted fields are encoded as "Restricted_from_API"
+in the vector database. They will decode as "[API Restricted]".
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/utils/odoo-error-parser.ts` | Parse Odoo security errors to extract field names |
+| `src/services/odoo-client.ts` | `searchReadWithRetry()` method with automatic field fallback |
+| `src/services/data-transformer.ts` | `RESTRICTED_FIELD_MARKER` constant and encoding logic |
+| `src/services/data-sync.ts` | Orchestrates resilient sync with `EncodingContext` |
+| `src/types.ts` | `FieldRestriction`, `EncodingContext`, `ResilientSearchResult` types |
+
+### Deployment
+
+Server is deployed on **Railway**. After code changes:
+1. Push to git repository
+2. Railway auto-deploys from main branch
+3. Server restarts with new code

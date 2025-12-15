@@ -24,7 +24,23 @@ import type {
   CoordinateMetadata,
   ParsedField,
   DecodedField,
+  EncodingContext,
 } from '../types.js';
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
+/**
+ * Marker value for fields that could not be read due to API restrictions
+ *
+ * When a field is restricted by Odoo security rules (e.g., eLearning fields
+ * on res.partner), we encode it with this marker instead of failing the sync.
+ *
+ * Encoded format: prefix*Restricted_from_API
+ * Display format: [API Restricted]
+ */
+export const RESTRICTED_FIELD_MARKER = 'Restricted_from_API';
 
 // =============================================================================
 // SCHEMA VALIDATION
@@ -200,17 +216,31 @@ export function encodeValue(value: unknown, fieldType: string): string {
  *
  * Format: 344^6327*12345|344^6299*450000|78^956*201|...
  *
+ * **Restricted Field Handling:**
+ * If an `EncodingContext` is provided and a field is in `restricted_fields`,
+ * the value is encoded as `Restricted_from_API` instead of the actual value.
+ * This allows syncs to continue when certain fields are blocked by API permissions.
+ *
  * @param record - Raw Odoo record from searchRead
  * @param encodingMap - Field name to prefix mapping
+ * @param context - Optional encoding context with restricted field information
  * @returns Encoded string
  */
 export function encodeRecord(
   record: Record<string, unknown>,
-  encodingMap: FieldEncodingMap
+  encodingMap: FieldEncodingMap,
+  context?: EncodingContext
 ): string {
   const parts: string[] = [];
 
   for (const [fieldName, fieldInfo] of Object.entries(encodingMap)) {
+    // Check if this field is restricted
+    if (context?.restricted_fields.has(fieldName)) {
+      // Encode restricted fields with the marker
+      parts.push(`${fieldInfo.prefix}*${RESTRICTED_FIELD_MARKER}`);
+      continue;
+    }
+
     const value = record[fieldName];
     const encodedValue = encodeValue(value, fieldInfo.field_type);
 
@@ -241,17 +271,19 @@ export function getModelFields(modelName: string): OdooSchemaRow[] {
  * @param records - Raw Odoo records
  * @param encodingMap - Field encoding map
  * @param config - Transform configuration
+ * @param context - Optional encoding context with restricted field information
  * @returns Array of encoded records
  */
 export function transformRecords(
   records: Record<string, unknown>[],
   encodingMap: FieldEncodingMap,
-  config: DataTransformConfig
+  config: DataTransformConfig,
+  context?: EncodingContext
 ): EncodedRecord[] {
   const encodedRecords: EncodedRecord[] = [];
 
   for (const record of records) {
-    const encodedString = encodeRecord(record, encodingMap);
+    const encodedString = encodeRecord(record, encodingMap, context);
     encodedRecords.push({
       record_id: record.id as number,
       model_name: config.model_name,
@@ -500,6 +532,7 @@ export function parseEncodedString(encoded: string): ParsedField[] {
  * - boolean: TRUE → "Yes", FALSE → "No"
  * - date: "2025-01-15" → "Jan 15, 2025"
  * - many2one: 201 → "#201 (res.partner)"
+ * - Restricted_from_API → "[API Restricted]"
  *
  * @param rawValue - The raw value from the encoded string
  * @param fieldType - The field type from schema (e.g., "monetary", "boolean")
@@ -511,6 +544,11 @@ export function formatDisplayValue(
   fieldType: string,
   targetModel?: string
 ): string {
+  // Handle restricted field marker
+  if (rawValue === RESTRICTED_FIELD_MARKER) {
+    return '[API Restricted]';
+  }
+
   // Handle empty/false values
   if (rawValue === '' || rawValue === 'false' || rawValue === 'FALSE') {
     // Special case: boolean FALSE is a valid value, not empty
