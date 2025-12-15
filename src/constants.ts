@@ -29,6 +29,13 @@ export const QDRANT_CONFIG = {
   COLLECTION: process.env.SCHEMA_COLLECTION_NAME || 'odoo_schema',
   VECTOR_SIZE: parseInt(process.env.VECTOR_SIZE || process.env.EMBEDDING_DIMENSIONS || '512', 10),
   DISTANCE_METRIC: 'Cosine' as const,
+  // Scalar Quantization: Reduces memory by 75% (float32 → int8)
+  // Set ENABLE_SCALAR_QUANTIZATION=false to disable
+  ENABLE_SCALAR_QUANTIZATION: process.env.ENABLE_SCALAR_QUANTIZATION !== 'false',
+  SCALAR_QUANTILE: parseFloat(process.env.SCALAR_QUANTILE || '0.99'),
+  // Search optimization params for quantized vectors
+  SEARCH_RESCORE: process.env.SEARCH_RESCORE !== 'false',
+  SEARCH_OVERSAMPLING: parseFloat(process.env.SEARCH_OVERSAMPLING || '1.5'),
 } as const;
 
 /**

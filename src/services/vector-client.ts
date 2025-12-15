@@ -75,6 +75,10 @@ export async function collectionExists(collectionName: string): Promise<boolean>
 
 /**
  * Create the schema collection
+ *
+ * Supports scalar quantization for 75% memory reduction:
+ * - float32 vectors (4 bytes/dim) → int8 (1 byte/dim)
+ * - Configurable via ENABLE_SCALAR_QUANTIZATION env var
  */
 export async function createSchemaCollection(): Promise<boolean> {
   if (!qdrantClient) throw new Error('Vector client not initialized');
@@ -85,12 +89,32 @@ export async function createSchemaCollection(): Promise<boolean> {
     return false;
   }
 
-  await qdrantClient.createCollection(QDRANT_CONFIG.COLLECTION, {
-    vectors: {
-      size: QDRANT_CONFIG.VECTOR_SIZE,
-      distance: QDRANT_CONFIG.DISTANCE_METRIC,
-    },
-  });
+  // Build base collection config
+  const vectorsConfig = {
+    size: QDRANT_CONFIG.VECTOR_SIZE,
+    distance: QDRANT_CONFIG.DISTANCE_METRIC,
+  };
+
+  // Add scalar quantization if enabled (default: true)
+  // This reduces memory by 75% with minimal accuracy loss
+  if (QDRANT_CONFIG.ENABLE_SCALAR_QUANTIZATION) {
+    await qdrantClient.createCollection(QDRANT_CONFIG.COLLECTION, {
+      vectors: vectorsConfig,
+      quantization_config: {
+        scalar: {
+          type: 'int8' as const,
+          quantile: QDRANT_CONFIG.SCALAR_QUANTILE, // Exclude outliers (default 0.99)
+          always_ram: true, // Keep quantized vectors in RAM for speed
+        },
+      },
+    });
+    console.error('[Vector] Scalar quantization ENABLED (75% memory reduction)');
+  } else {
+    await qdrantClient.createCollection(QDRANT_CONFIG.COLLECTION, {
+      vectors: vectorsConfig,
+    });
+    console.error('[Vector] Scalar quantization DISABLED');
+  }
 
   // Create payload indexes for efficient filtering
   const indexFields = [
@@ -192,13 +216,34 @@ export async function searchSchemaCollection(
   const qdrantFilter = filter ? buildQdrantFilter(filter) : undefined;
 
   try {
-    const results = await qdrantClient.search(QDRANT_CONFIG.COLLECTION, {
+    // Build search params - add quantization rescore if enabled
+    // Rescoring re-ranks results using full vectors for accuracy
+    const searchParams: {
+      vector: number[];
+      limit: number;
+      score_threshold: number;
+      filter?: object;
+      with_payload: boolean;
+      params?: { quantization?: { rescore: boolean; oversampling: number } };
+    } = {
       vector,
       limit,
       score_threshold: minScore,
       filter: qdrantFilter,
       with_payload: true,
-    });
+    };
+
+    // Add quantization search params for rescoring (improves accuracy)
+    if (QDRANT_CONFIG.ENABLE_SCALAR_QUANTIZATION && QDRANT_CONFIG.SEARCH_RESCORE) {
+      searchParams.params = {
+        quantization: {
+          rescore: true, // Re-rank using full float32 vectors
+          oversampling: QDRANT_CONFIG.SEARCH_OVERSAMPLING, // Fetch extra, keep best
+        },
+      };
+    }
+
+    const results = await qdrantClient.search(QDRANT_CONFIG.COLLECTION, searchParams);
 
     return results.map(r => ({
       id: r.id as number,
@@ -211,6 +256,7 @@ export async function searchSchemaCollection(
       filter: qdrantFilter ? JSON.stringify(qdrantFilter, null, 2) : 'none',
       limit,
       minScore,
+      quantizationEnabled: QDRANT_CONFIG.ENABLE_SCALAR_QUANTIZATION,
       error: error instanceof Error ? error.message : String(error),
     });
     throw error;
