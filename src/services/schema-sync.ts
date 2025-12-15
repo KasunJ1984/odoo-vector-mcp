@@ -5,7 +5,8 @@
  * Handles embedding generation and batch uploads.
  */
 
-import { SYNC_CONFIG, QDRANT_CONFIG } from '../constants.js';
+import * as path from 'path';
+import { SYNC_CONFIG, QDRANT_CONFIG, SCHEMA_CONFIG } from '../constants.js';
 import { loadSchema, buildSemanticText, clearSchemaCache } from './schema-loader.js';
 import { embed, embedBatch, isEmbeddingServiceAvailable } from './embedding-service.js';
 import { clearCache } from './cache-service.js';
@@ -14,9 +15,20 @@ import {
   upsertSchemaPoints,
   getCollectionInfo,
   deleteCollection,
+  deleteSchemaPoints,
   isVectorClientAvailable,
 } from './vector-client.js';
-import type { OdooSchemaRow, SchemaPoint, SchemaPayload, SchemaSyncResult, SchemaSyncStatus } from '../types.js';
+import {
+  loadSyncMetadata,
+  saveSyncMetadata,
+  detectChanges,
+  hasSchemaFileChanged,
+  buildChecksumMap,
+  createSyncMetadata,
+  formatChangesSummary,
+  clearSyncMetadata,
+} from './sync-metadata.js';
+import type { OdooSchemaRow, SchemaPoint, SchemaPayload, SchemaSyncResult, SchemaSyncStatus, IncrementalSyncResult } from '../types.js';
 
 // =============================================================================
 // SYNC STATE
@@ -265,4 +277,283 @@ export async function syncSingleSchema(schema: OdooSchemaRow): Promise<boolean> 
     console.error('[SchemaSync] Single sync failed:', error);
     return false;
   }
+}
+
+// =============================================================================
+// INCREMENTAL SYNC
+// =============================================================================
+
+/**
+ * Incremental sync - only process changed fields
+ *
+ * Key features:
+ * 1. Compares current schema with previous sync metadata
+ * 2. Only embeds added/modified fields (huge API cost savings)
+ * 3. Deletes removed fields from Qdrant
+ * 4. Preserves query cache if no changes detected
+ *
+ * Integration with Improvement #2 (Caching):
+ * - If changes detected → clears cache (ensures freshness)
+ * - If no changes → preserves cache (instant return)
+ *
+ * @param onProgress - Progress callback
+ * @returns IncrementalSyncResult with counts of added/modified/deleted/unchanged
+ */
+export async function incrementalSyncSchema(
+  onProgress?: (phase: string, current: number, total: number) => void
+): Promise<IncrementalSyncResult> {
+  const startTime = Date.now();
+
+  // Check prerequisites
+  if (!isVectorClientAvailable()) {
+    return {
+      success: false,
+      added: 0,
+      modified: 0,
+      deleted: 0,
+      unchanged: 0,
+      durationMs: Date.now() - startTime,
+      cacheCleared: false,
+      errors: ['Vector client not available. Check QDRANT_HOST.'],
+    };
+  }
+
+  if (!isEmbeddingServiceAvailable()) {
+    return {
+      success: false,
+      added: 0,
+      modified: 0,
+      deleted: 0,
+      unchanged: 0,
+      durationMs: Date.now() - startTime,
+      cacheCleared: false,
+      errors: ['Embedding service not available. Check VOYAGE_API_KEY.'],
+    };
+  }
+
+  if (isSyncing) {
+    return {
+      success: false,
+      added: 0,
+      modified: 0,
+      deleted: 0,
+      unchanged: 0,
+      durationMs: Date.now() - startTime,
+      cacheCleared: false,
+      errors: ['Sync already in progress.'],
+    };
+  }
+
+  isSyncing = true;
+  const errors: string[] = [];
+
+  try {
+    // Phase 1: Load previous metadata and current schema
+    onProgress?.('loading', 0, 1);
+    console.error('[IncrementalSync] Phase 1: Loading schema and metadata...');
+
+    const schemaFilePath = path.resolve(process.cwd(), SCHEMA_CONFIG.DATA_FILE);
+    const previousMetadata = loadSyncMetadata();
+
+    // Quick check: has schema file changed at all?
+    if (previousMetadata && !hasSchemaFileChanged(schemaFilePath, previousMetadata)) {
+      console.error('[IncrementalSync] Schema file unchanged - no sync needed');
+      return {
+        success: true,
+        added: 0,
+        modified: 0,
+        deleted: 0,
+        unchanged: previousMetadata.totalFields,
+        durationMs: Date.now() - startTime,
+        cacheCleared: false, // Cache preserved!
+      };
+    }
+
+    // Load current schema
+    clearSchemaCache(); // Ensure fresh load
+    const schemas = loadSchema();
+
+    if (schemas.length === 0) {
+      throw new Error('No schema data found. Check data/odoo_schema.txt');
+    }
+
+    console.error(`[IncrementalSync] Loaded ${schemas.length} current schema rows`);
+
+    // Phase 2: Build checksums and detect changes
+    onProgress?.('detecting', 0, 1);
+    console.error('[IncrementalSync] Phase 2: Detecting changes...');
+
+    // Build semantic texts and checksums for all current fields
+    const schemaWithTexts = schemas.map(schema => ({
+      field_id: schema.field_id,
+      schema,
+      semanticText: buildSemanticText(schema),
+    }));
+
+    const currentChecksums = buildChecksumMap(
+      schemaWithTexts.map(s => ({ field_id: s.field_id, semanticText: s.semanticText }))
+    );
+
+    const changes = detectChanges(previousMetadata, currentChecksums);
+    const totalChanges = changes.added.length + changes.modified.length + changes.deleted.length;
+
+    console.error(`[IncrementalSync] ${formatChangesSummary(changes)}`);
+
+    // If no changes, return early (preserve cache)
+    if (totalChanges === 0) {
+      console.error('[IncrementalSync] No changes detected - updating metadata only');
+
+      // Still save metadata (updates timestamp)
+      saveSyncMetadata(createSyncMetadata(schemaFilePath, currentChecksums));
+      lastSyncTime = new Date().toISOString();
+
+      return {
+        success: true,
+        added: 0,
+        modified: 0,
+        deleted: 0,
+        unchanged: schemas.length,
+        durationMs: Date.now() - startTime,
+        cacheCleared: false, // Cache preserved!
+      };
+    }
+
+    // Phase 3: Process changes
+    console.error('[IncrementalSync] Phase 3: Processing changes...');
+
+    // Ensure collection exists
+    const collectionInfo = await getCollectionInfo(QDRANT_CONFIG.COLLECTION);
+    if (!collectionInfo.exists) {
+      console.error('[IncrementalSync] Collection does not exist - creating...');
+      await createSchemaCollection();
+    }
+
+    let addedCount = 0;
+    let modifiedCount = 0;
+
+    // Get schemas that need embedding (added + modified)
+    const fieldsToEmbed = changes.added.concat(changes.modified);
+    const schemasToEmbed = schemaWithTexts.filter(s => fieldsToEmbed.includes(s.field_id));
+
+    if (schemasToEmbed.length > 0) {
+      // Process in batches
+      const totalBatches = Math.ceil(schemasToEmbed.length / SYNC_CONFIG.BATCH_SIZE);
+      console.error(`[IncrementalSync] Embedding ${schemasToEmbed.length} fields in ${totalBatches} batch(es)...`);
+
+      for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+        const batchStart = batchIndex * SYNC_CONFIG.BATCH_SIZE;
+        const batchEnd = Math.min(batchStart + SYNC_CONFIG.BATCH_SIZE, schemasToEmbed.length);
+        const batch = schemasToEmbed.slice(batchStart, batchEnd);
+
+        onProgress?.('embedding', batchStart, schemasToEmbed.length);
+        console.error(`[IncrementalSync] Batch ${batchIndex + 1}/${totalBatches} (${batch.length} fields)`);
+
+        try {
+          // Generate embeddings
+          const semanticTexts = batch.map(s => s.semanticText);
+          const embeddings = await embedBatch(semanticTexts, 'document');
+
+          // Build points for upsert
+          const points: SchemaPoint[] = [];
+          for (let i = 0; i < batch.length; i++) {
+            const { schema, semanticText, field_id } = batch[i];
+            const embedding = embeddings[i];
+
+            if (embedding) {
+              points.push({
+                id: field_id,
+                vector: embedding,
+                payload: buildSchemaPayload(schema, semanticText),
+              });
+
+              // Track added vs modified
+              if (changes.added.includes(field_id)) {
+                addedCount++;
+              } else {
+                modifiedCount++;
+              }
+            } else {
+              errors.push(`Failed to embed: ${schema.model_name}.${schema.field_name}`);
+            }
+          }
+
+          // Upsert to Qdrant
+          if (points.length > 0) {
+            onProgress?.('uploading', batchStart, schemasToEmbed.length);
+            await upsertSchemaPoints(points);
+          }
+        } catch (batchError) {
+          const errorMsg = batchError instanceof Error ? batchError.message : String(batchError);
+          console.error(`[IncrementalSync] Batch ${batchIndex + 1} error:`, errorMsg);
+          errors.push(`Batch ${batchIndex + 1} error: ${errorMsg}`);
+        }
+      }
+    }
+
+    // Delete removed fields
+    if (changes.deleted.length > 0) {
+      onProgress?.('deleting', 0, changes.deleted.length);
+      console.error(`[IncrementalSync] Deleting ${changes.deleted.length} removed fields...`);
+      try {
+        await deleteSchemaPoints(changes.deleted);
+      } catch (deleteError) {
+        const errorMsg = deleteError instanceof Error ? deleteError.message : String(deleteError);
+        console.error('[IncrementalSync] Delete error:', errorMsg);
+        errors.push(`Delete error: ${errorMsg}`);
+      }
+    }
+
+    // Phase 4: Save metadata and clear cache
+    onProgress?.('finalizing', 0, 1);
+    console.error('[IncrementalSync] Phase 4: Finalizing...');
+
+    // Save metadata (only after successful processing)
+    saveSyncMetadata(createSyncMetadata(schemaFilePath, currentChecksums));
+    lastSyncTime = new Date().toISOString();
+
+    // Clear cache since we have changes (Improvement #2 integration)
+    clearCache();
+    console.error('[IncrementalSync] Query cache cleared due to changes');
+
+    const unchangedCount = schemas.length - addedCount - modifiedCount;
+
+    console.error(`[IncrementalSync] Complete: ${addedCount} added, ${modifiedCount} modified, ${changes.deleted.length} deleted, ${unchangedCount} unchanged`);
+
+    return {
+      success: errors.length === 0,
+      added: addedCount,
+      modified: modifiedCount,
+      deleted: changes.deleted.length,
+      unchanged: unchangedCount,
+      durationMs: Date.now() - startTime,
+      cacheCleared: true, // Cache was cleared due to changes
+      errors: errors.length > 0 ? errors : undefined,
+    };
+
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error('[IncrementalSync] Failed:', errorMsg);
+    return {
+      success: false,
+      added: 0,
+      modified: 0,
+      deleted: 0,
+      unchanged: 0,
+      durationMs: Date.now() - startTime,
+      cacheCleared: false,
+      errors: [errorMsg],
+    };
+  } finally {
+    isSyncing = false;
+  }
+}
+
+/**
+ * Reset incremental sync metadata
+ *
+ * Call this to force next incremental sync to behave like full sync.
+ */
+export function resetSyncMetadata(): void {
+  clearSyncMetadata();
+  console.error('[SchemaSync] Sync metadata reset - next incremental sync will be full');
 }

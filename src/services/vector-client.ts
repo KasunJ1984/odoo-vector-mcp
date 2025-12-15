@@ -347,6 +347,31 @@ export async function scrollSchemaCollection(options: {
 // =============================================================================
 
 /**
+ * Delete schema points by field IDs
+ *
+ * Used by incremental sync to remove deleted fields.
+ */
+export async function deleteSchemaPoints(fieldIds: number[]): Promise<void> {
+  if (!qdrantClient) throw new Error('Vector client not initialized');
+
+  if (fieldIds.length === 0) {
+    console.error('[Vector] No points to delete');
+    return;
+  }
+
+  try {
+    await qdrantClient.delete(QDRANT_CONFIG.COLLECTION, {
+      wait: true,
+      points: fieldIds,
+    });
+    console.error(`[Vector] Deleted ${fieldIds.length} points`);
+  } catch (error) {
+    console.error('[Vector] Delete failed:', error);
+    throw error;
+  }
+}
+
+/**
  * Build Qdrant filter from SchemaFilter
  *
  * Supports:

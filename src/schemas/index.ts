@@ -108,18 +108,23 @@ export type SemanticSearchInput = z.infer<typeof SemanticSearchSchema>;
 export const SyncSchema = z.object({
   /**
    * Sync action to perform
+   *
+   * - status: Check sync status and collection info
+   * - full_sync: Upload ALL schema fields (17,930) - slow but complete
+   * - incremental_sync: Only sync changed fields - fast, preserves cache if no changes
    */
   action: z
-    .enum(['status', 'full_sync'])
-    .describe('Action: "status" to check sync status, "full_sync" to upload all schema'),
+    .enum(['status', 'full_sync', 'incremental_sync'])
+    .describe('Action: "status" = check status, "full_sync" = upload all, "incremental_sync" = only changed fields'),
 
   /**
    * Force recreate collection (deletes existing data)
+   * Only applies to full_sync action
    */
   force_recreate: z
     .boolean()
     .default(false)
-    .describe('Delete and recreate collection before sync'),
+    .describe('Delete and recreate collection before sync (full_sync only)'),
 }).strict();
 
 /**

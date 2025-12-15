@@ -14,7 +14,7 @@ import type { SemanticSearchInput, SyncInput } from '../schemas/index.js';
 import type { SchemaFilter, VectorSearchResult } from '../types.js';
 import { embed, isEmbeddingServiceAvailable } from '../services/embedding-service.js';
 import { searchSchemaCollection, scrollSchemaCollection, isVectorClientAvailable, getCollectionInfo } from '../services/vector-client.js';
-import { syncSchemaToQdrant, getSyncStatus } from '../services/schema-sync.js';
+import { syncSchemaToQdrant, getSyncStatus, incrementalSyncSchema } from '../services/schema-sync.js';
 import { getSchemaStats, getAllModelNames } from '../services/schema-loader.js';
 import { QDRANT_CONFIG } from '../constants.js';
 import { generateCacheKey, getCached, setCache, getCacheStats } from '../services/cache-service.js';
@@ -312,9 +312,15 @@ Try:
 
 **Actions:**
 - "status": Check current sync status and collection info
-- "full_sync": Upload all 17,930 schema fields to Qdrant
+- "full_sync": Upload ALL 17,930 schema fields (slow, ~60s)
+- "incremental_sync": Only sync changed fields (fast, preserves cache if no changes)
 
-**Note:** Full sync takes several minutes and requires VOYAGE_API_KEY for embeddings.`,
+**Recommended:** Use incremental_sync for regular updates. It:
+- Detects added/modified/deleted fields
+- Only embeds what changed (saves API costs)
+- Preserves query cache if no changes (instant return)
+
+**Note:** Requires VOYAGE_API_KEY for embeddings.`,
     SyncSchema.shape,
     async (args) => {
       try {
@@ -388,21 +394,105 @@ ${Object.entries(stats.fieldTypes)
             return {
               content: [{
                 type: 'text',
-                text: `✅ **Sync Complete**
+                text: `✅ **Full Sync Complete**
 
 - Uploaded: ${result.uploaded.toLocaleString()} schemas
 - Failed: ${result.failed}
-- Duration: ${(result.durationMs / 1000).toFixed(1)}s`,
+- Duration: ${(result.durationMs / 1000).toFixed(1)}s
+- Cache: Cleared`,
               }],
             };
           } else {
             return {
               content: [{
                 type: 'text',
-                text: `⚠️ **Sync Completed with Errors**
+                text: `⚠️ **Full Sync Completed with Errors**
 
 - Uploaded: ${result.uploaded.toLocaleString()}
 - Failed: ${result.failed}
+- Duration: ${(result.durationMs / 1000).toFixed(1)}s
+
+**Errors:**
+${result.errors?.slice(0, 5).join('\n') || 'None'}`,
+              }],
+            };
+          }
+        }
+
+        // =====================================================================
+        // INCREMENTAL SYNC
+        // =====================================================================
+        if (input.action === 'incremental_sync') {
+          // Check prerequisites
+          if (!isVectorClientAvailable()) {
+            return {
+              content: [{
+                type: 'text',
+                text: '❌ Vector database not available. Check QDRANT_HOST.',
+              }],
+            };
+          }
+
+          if (!isEmbeddingServiceAvailable()) {
+            return {
+              content: [{
+                type: 'text',
+                text: '❌ Embedding service not available. Check VOYAGE_API_KEY.',
+              }],
+            };
+          }
+
+          // Run incremental sync
+          const result = await incrementalSyncSchema(
+            (phase, current, total) => {
+              console.error(`[IncrementalSync] ${phase}: ${current}/${total}`);
+            }
+          );
+
+          if (result.success) {
+            const totalChanges = result.added + result.modified + result.deleted;
+
+            // No changes case - fast path
+            if (totalChanges === 0) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: `✅ **Incremental Sync: No Changes**
+
+- Schema unchanged: ${result.unchanged.toLocaleString()} fields
+- Duration: ${(result.durationMs / 1000).toFixed(1)}s
+- Cache: Preserved ✓
+
+*Schema is up to date. Query cache preserved for fast searches.*`,
+                }],
+              };
+            }
+
+            // Changes detected
+            return {
+              content: [{
+                type: 'text',
+                text: `✅ **Incremental Sync Complete**
+
+**Changes Processed:**
+- Added: ${result.added}
+- Modified: ${result.modified}
+- Deleted: ${result.deleted}
+- Unchanged: ${result.unchanged.toLocaleString()}
+
+- Duration: ${(result.durationMs / 1000).toFixed(1)}s
+- Cache: ${result.cacheCleared ? 'Cleared (changes detected)' : 'Preserved'}`,
+              }],
+            };
+          } else {
+            return {
+              content: [{
+                type: 'text',
+                text: `⚠️ **Incremental Sync Failed**
+
+- Added: ${result.added}
+- Modified: ${result.modified}
+- Deleted: ${result.deleted}
 - Duration: ${(result.durationMs / 1000).toFixed(1)}s
 
 **Errors:**

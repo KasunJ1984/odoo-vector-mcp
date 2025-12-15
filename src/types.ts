@@ -235,3 +235,29 @@ export interface ToolContent {
 export interface ToolResult {
   content: ToolContent[];
 }
+
+// =============================================================================
+// INCREMENTAL SYNC TYPES
+// =============================================================================
+
+/**
+ * Result of incremental sync operation
+ */
+export interface IncrementalSyncResult {
+  /** Whether sync completed successfully */
+  success: boolean;
+  /** Number of new fields added */
+  added: number;
+  /** Number of modified fields updated */
+  modified: number;
+  /** Number of deleted fields removed */
+  deleted: number;
+  /** Number of unchanged fields skipped */
+  unchanged: number;
+  /** Total sync duration in milliseconds */
+  durationMs: number;
+  /** Whether cache was cleared (only if changes occurred) */
+  cacheCleared: boolean;
+  /** Error messages if any */
+  errors?: string[];
+}
