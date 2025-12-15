@@ -395,9 +395,11 @@ export async function deleteSchemaPoints(fieldIds: number[]): Promise<void> {
  * - Exact match or array of field_types
  * - Prefix match on primary_data_location (for references_in)
  * - Boolean match on stored
+ * - point_type filter (schema, data, or all)
  */
-function buildQdrantFilter(filter: SchemaFilter): { must: object[] } {
+function buildQdrantFilter(filter: SchemaFilter): { must?: object[]; must_not?: object[] } {
   const must: object[] = [];
+  const must_not: object[] = [];
 
   if (filter.model_name) {
     must.push({ key: 'model_name', match: { value: filter.model_name } });
@@ -431,5 +433,22 @@ function buildQdrantFilter(filter: SchemaFilter): { must: object[] } {
     must.push({ key: 'stored', match: { value: true } });
   }
 
-  return { must };
+  // Handle point_type filter
+  // - 'schema': Only schema points (exclude data points using must_not)
+  //   Schema points don't have point_type field set (legacy), so we exclude 'data'
+  // - 'data': Only data points (point_type = 'data')
+  // - 'all' or undefined: No point_type filter (search everything)
+  if (filter.point_type === 'data') {
+    must.push({ key: 'point_type', match: { value: 'data' } });
+  } else if (filter.point_type === 'schema') {
+    // Schema points don't have point_type set, so exclude data points
+    must_not.push({ key: 'point_type', match: { value: 'data' } });
+  }
+  // 'all' = no point_type filter needed
+
+  const result: { must?: object[]; must_not?: object[] } = {};
+  if (must.length > 0) result.must = must;
+  if (must_not.length > 0) result.must_not = must_not;
+
+  return result;
 }

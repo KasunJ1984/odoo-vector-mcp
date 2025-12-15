@@ -11,7 +11,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SemanticSearchSchema, SyncSchema } from '../schemas/index.js';
 import type { SemanticSearchInput, SyncInput } from '../schemas/index.js';
-import type { SchemaFilter, VectorSearchResult } from '../types.js';
+import type { SchemaFilter, VectorSearchResult, SchemaPayload, DataPayload } from '../types.js';
+import { isDataPayload } from '../types.js';
 import { embed, isEmbeddingServiceAvailable } from '../services/embedding-service.js';
 import { searchSchemaCollection, scrollSchemaCollection, isVectorClientAvailable, getCollectionInfo } from '../services/vector-client.js';
 import { syncSchemaToQdrant, getSyncStatus, incrementalSyncSchema } from '../services/schema-sync.js';
@@ -33,51 +34,39 @@ export function registerSearchTools(server: McpServer): void {
 
   server.tool(
     'semantic_search',
-    `Search Odoo schema (17,930 fields across 709 models) with semantic + coordinate understanding.
+    `Search Odoo schema AND data with semantic understanding.
 
-**COORDINATE SYSTEM (Memory Blocks):**
-The schema uses a coordinate encoding: \`4^XX*VALUE\`
-- \`4\` = ir.model.fields table (the schema)
-- \`58\` = model_id column
-- \`26\` = field name column
-- \`28\` = model name column
+**UNIFIED SEARCH - Schema + Data in One Collection:**
+- Schema: 17,930 field definitions (WHERE data lives)
+- Data: CRM records like crm.lead (WHAT the actual values are)
 
-Example: \`4^58*292\` means "model_id = 292" which is account.account
-So ALL fields in account.account have model_id = 292
+**POINT TYPES:**
+- \`schema\` (default): Search field definitions only
+- \`data\`: Search actual CRM records
+- \`all\`: Search both schema and data together
+
+**DATA ENCODING FORMAT:**
+Data uses coordinate encoding: \`[model_id]^[field_id]*VALUE\`
+Example crm.lead record: \`344^6327*12345|344^6299*450000|78^956*201\`
+- \`344^6327*12345\` = crm.lead.id = 12345
+- \`78^956*201\` = partner_id → res.partner id=201 (FK uses TARGET model prefix!)
 
 **SEARCH MODES:**
 1. \`semantic\` (default): Natural language vector search
-   - "Where is customer email?"
-   - "Fields related to revenue"
+   - Schema: "Where is customer email?" → finds field definitions
+   - Data: "Hospital projects in Victoria" → finds CRM records
 
-2. \`list\`: Get ALL fields in a model (filter-only, no similarity)
-   - "How many columns in account.account?" → Use list mode, count results
-   - { "query": "all", "model_filter": "account.account", "search_mode": "list" }
+2. \`list\`: Get ALL fields in a model (schema only)
+   - { "query": "all", "model_filter": "crm.lead", "search_mode": "list" }
 
-3. \`references_out\`: Find fields that POINT TO other models (outgoing FKs)
-   - "What does crm.lead connect to?"
-   - Returns: partner_id→res.partner, user_id→res.users
-
-4. \`references_in\`: Find fields that POINT TO a model (incoming FKs)
-   - "What references res.partner?"
-   - Returns: crm.lead.partner_id, sale.order.partner_id
-
-**IMPORTANT DISTINCTION:**
-- "Fields IN account.account" = fields that BELONG to account.account model
-- "Fields that REFERENCE account.account" = many2one fields in OTHER models pointing to account.account
-
-**COORDINATE QUERIES:**
-- "How many columns in account.account?" → list mode, count results
-- "Fields where model_id=267" → list mode with model filter
-
-**MODEL ID REFERENCE (Common models):**
-- account.account = 292 | crm.lead = 267 | res.partner = 78 | res.users = 81
+3. \`references_out\`: Find outgoing FK fields (schema only)
+4. \`references_in\`: Find incoming FK fields (schema only)
 
 **EXAMPLES:**
-- Semantic: { "query": "salesperson assignment" }
-- List all: { "query": "all", "model_filter": "crm.lead", "search_mode": "list", "limit": 150 }
-- Outgoing: { "query": "links", "model_filter": "crm.lead", "search_mode": "references_out" }
-- Incoming: { "query": "refs", "model_filter": "res.partner", "search_mode": "references_in" }`,
+- Search schema: { "query": "revenue fields", "point_type": "schema" }
+- Search data: { "query": "hospital projects Victoria", "point_type": "data" }
+- Search both: { "query": "Hansen Yuncken", "point_type": "all" }
+- List fields: { "query": "all", "model_filter": "crm.lead", "search_mode": "list" }`,
     SemanticSearchSchema.shape,
     async (args) => {
       try {
@@ -228,7 +217,8 @@ ${suggestions.length > 0 ? `**Did you mean:**\n${suggestions.map(s => `- ${s}`).
           input.model_filter,
           input.type_filter ? [input.type_filter] : undefined,
           input.limit,
-          input.min_similarity
+          input.min_similarity,
+          input.point_type  // Include point_type in cache key
         );
 
         const cachedResults = getCached(cacheKey);
@@ -258,6 +248,7 @@ ${suggestions.length > 0 ? `**Did you mean:**\n${suggestions.map(s => `- ${s}`).
         if (input.model_filter) filter.model_name = input.model_filter;
         if (input.type_filter) filter.field_type = input.type_filter;
         if (input.stored_only) filter.stored_only = true;
+        if (input.point_type) filter.point_type = input.point_type;
 
         // Search
         results = await searchSchemaCollection(queryEmbedding, {
@@ -526,7 +517,7 @@ ${result.errors?.slice(0, 5).join('\n') || 'None'}`,
 // =============================================================================
 
 /**
- * Format semantic search results for display
+ * Format semantic search results for display (handles both schema and data)
  */
 function formatSearchResults(
   query: string,
@@ -534,48 +525,70 @@ function formatSearchResults(
 ): string {
   const lines: string[] = [];
 
-  lines.push(`**Found ${results.length} results for:** "${query}"\n`);
+  // Count schema vs data results
+  const schemaResults = results.filter(r => !isDataPayload(r.payload));
+  const dataResults = results.filter(r => isDataPayload(r.payload));
+
+  lines.push(`**Found ${results.length} results for:** "${query}"`);
+  if (schemaResults.length > 0 && dataResults.length > 0) {
+    lines.push(`(${schemaResults.length} schema, ${dataResults.length} data)`);
+  }
+  lines.push('');
 
   for (let i = 0; i < results.length; i++) {
     const { score, payload } = results[i];
 
-    const modelName = payload.model_name;
-    const fieldName = payload.field_name;
-    const fieldLabel = payload.field_label;
-    const fieldType = payload.field_type;
-    const primaryLocation = payload.primary_data_location;
-    const stored = payload.stored;
-    const primaryModelId = payload.primary_model_id;
-    const primaryFieldId = payload.primary_field_id;
-
     lines.push(`---`);
-    lines.push(`### ${i + 1}. ${modelName}.${fieldName}`);
-    lines.push(`**Label:** ${fieldLabel}`);
-    lines.push(`**Type:** ${fieldType}`);
 
-    // Show relationship info for relational fields
-    if (fieldType === 'many2one') {
-      const relatedModel = primaryLocation.replace('.id', '');
-      lines.push(`**Relates to:** ${relatedModel}`);
-    } else if (fieldType === 'one2many' || fieldType === 'many2many') {
-      lines.push(`**Related location:** ${primaryLocation}`);
+    if (isDataPayload(payload)) {
+      // Format DATA result
+      const dataPayload = payload as DataPayload;
+      lines.push(`### ${i + 1}. [DATA] ${dataPayload.model_name} #${dataPayload.record_id}`);
+      lines.push(`**Record ID:** ${dataPayload.record_id}`);
+      lines.push(`**Model:** ${dataPayload.model_name}`);
+      lines.push(`**Fields:** ${dataPayload.field_count}`);
+      lines.push(`**Score:** ${(score * 100).toFixed(1)}%`);
+
+      // Show first part of encoded string (truncate if too long)
+      const encoded = dataPayload.encoded_string;
+      const preview = encoded.length > 150 ? encoded.substring(0, 150) + '...' : encoded;
+      lines.push(`**Encoded:** \`${preview}\``);
+    } else {
+      // Format SCHEMA result
+      const schemaPayload = payload as SchemaPayload;
+      lines.push(`### ${i + 1}. [SCHEMA] ${schemaPayload.model_name}.${schemaPayload.field_name}`);
+      lines.push(`**Label:** ${schemaPayload.field_label}`);
+      lines.push(`**Type:** ${schemaPayload.field_type}`);
+
+      // Show relationship info for relational fields
+      if (schemaPayload.field_type === 'many2one') {
+        const relatedModel = schemaPayload.primary_data_location.replace('.id', '');
+        lines.push(`**Relates to:** ${relatedModel}`);
+      } else if (schemaPayload.field_type === 'one2many' || schemaPayload.field_type === 'many2many') {
+        lines.push(`**Related location:** ${schemaPayload.primary_data_location}`);
+      }
+
+      lines.push(`**Primary Data Location:** ${schemaPayload.primary_data_location}`);
+      lines.push(`**Stored:** ${schemaPayload.stored ? 'Yes' : 'No (Computed)'}`);
+      lines.push(`**IDs:** Model ${schemaPayload.primary_model_id} | Field ${schemaPayload.primary_field_id}`);
+      lines.push(`**Score:** ${(score * 100).toFixed(1)}%`);
     }
-
-    lines.push(`**Primary Data Location:** ${primaryLocation}`);
-    lines.push(`**Stored:** ${stored ? 'Yes' : 'No (Computed)'}`);
-    lines.push(`**IDs:** Model ${primaryModelId} | Field ${primaryFieldId}`);
-    lines.push(`**Score:** ${(score * 100).toFixed(1)}%`);
   }
 
   // Add helpful tip at the end
   lines.push(`\n---`);
-  lines.push(`💡 **Tip:** Use Model ID and Field ID to access data directly via Odoo API.`);
+  if (dataResults.length > 0) {
+    lines.push(`💡 **Tip:** Data records use coordinate encoding. Use schema search to decode field meanings.`);
+  } else {
+    lines.push(`💡 **Tip:** Use Model ID and Field ID to access data directly via Odoo API.`);
+  }
 
   return lines.join('\n');
 }
 
 /**
  * Format list mode results (all fields in a model)
+ * Note: List mode only works with schema, so we cast payloads to SchemaPayload
  */
 function formatListResults(
   modelName: string,
@@ -591,7 +604,8 @@ function formatListResults(
   // Group by field type for better overview
   const byType: Record<string, VectorSearchResult[]> = {};
   for (const r of results) {
-    const type = r.payload.field_type;
+    const payload = r.payload as SchemaPayload;
+    const type = payload.field_type;
     if (!byType[type]) byType[type] = [];
     byType[type].push(r);
   }
@@ -607,7 +621,8 @@ function formatListResults(
   for (const [type, fields] of Object.entries(byType).sort((a, b) => a[0].localeCompare(b[0]))) {
     lines.push(`### ${type} (${fields.length})`);
 
-    for (const { payload } of fields) {
+    for (const { payload: p } of fields) {
+      const payload = p as SchemaPayload;
       const storedMark = payload.stored ? '' : ' *(computed)*';
       lines.push(`- **${payload.field_name}** - ${payload.field_label}${storedMark}`);
 
@@ -622,9 +637,9 @@ function formatListResults(
 
   // Model coordinate info
   if (results.length > 0) {
-    const modelId = results[0].payload.model_id;
+    const payload = results[0].payload as SchemaPayload;
     lines.push(`---`);
-    lines.push(`📍 **Model coordinate:** 4^58*${modelId} (model_id=${modelId})`);
+    lines.push(`📍 **Model coordinate:** 4^58*${payload.model_id} (model_id=${payload.model_id})`);
   }
 
   return lines.join('\n');
@@ -632,6 +647,7 @@ function formatListResults(
 
 /**
  * Format references_out results (fields that POINT TO other models)
+ * Note: References mode only works with schema, so we cast payloads to SchemaPayload
  */
 function formatReferencesOutResults(
   modelName: string,
@@ -645,7 +661,8 @@ function formatReferencesOutResults(
   // Group by relationship type
   const byType: Record<string, VectorSearchResult[]> = {};
   for (const r of results) {
-    const type = r.payload.field_type;
+    const payload = r.payload as SchemaPayload;
+    const type = payload.field_type;
     if (!byType[type]) byType[type] = [];
     byType[type].push(r);
   }
@@ -655,7 +672,8 @@ function formatReferencesOutResults(
     lines.push(`### Many-to-One (Foreign Keys) - ${byType['many2one'].length}`);
     lines.push(`*Fields that link to ONE record in another model*\n`);
 
-    for (const { payload } of byType['many2one']) {
+    for (const { payload: p } of byType['many2one']) {
+      const payload = p as SchemaPayload;
       const targetModel = payload.primary_data_location.replace('.id', '');
       lines.push(`- **${payload.field_name}** (${payload.field_label})`);
       lines.push(`  → Links to: **${targetModel}**`);
@@ -668,7 +686,8 @@ function formatReferencesOutResults(
     lines.push(`### One-to-Many - ${byType['one2many'].length}`);
     lines.push(`*Fields that show MANY records from another model*\n`);
 
-    for (const { payload } of byType['one2many']) {
+    for (const { payload: p } of byType['one2many']) {
+      const payload = p as SchemaPayload;
       lines.push(`- **${payload.field_name}** (${payload.field_label})`);
       lines.push(`  → Shows records from: ${payload.primary_data_location}`);
     }
@@ -680,7 +699,8 @@ function formatReferencesOutResults(
     lines.push(`### Many-to-Many - ${byType['many2many'].length}`);
     lines.push(`*Fields with bidirectional many-to-many relationship*\n`);
 
-    for (const { payload } of byType['many2many']) {
+    for (const { payload: p } of byType['many2many']) {
+      const payload = p as SchemaPayload;
       lines.push(`- **${payload.field_name}** (${payload.field_label})`);
       lines.push(`  → Related: ${payload.primary_data_location}`);
     }
@@ -696,6 +716,7 @@ function formatReferencesOutResults(
 
 /**
  * Format references_in results (fields in OTHER models that point TO target)
+ * Note: References mode only works with schema, so we cast payloads to SchemaPayload
  */
 function formatReferencesInResults(
   targetModel: string,
@@ -715,7 +736,8 @@ function formatReferencesInResults(
   // Group by source model
   const byModel: Record<string, VectorSearchResult[]> = {};
   for (const r of results) {
-    const sourceModel = r.payload.model_name;
+    const payload = r.payload as SchemaPayload;
+    const sourceModel = payload.model_name;
     if (!byModel[sourceModel]) byModel[sourceModel] = [];
     byModel[sourceModel].push(r);
   }
@@ -725,7 +747,8 @@ function formatReferencesInResults(
   for (const [sourceModel, fields] of Object.entries(byModel).sort((a, b) => b[1].length - a[1].length)) {
     lines.push(`### ${sourceModel} (${fields.length} field${fields.length > 1 ? 's' : ''})`);
 
-    for (const { payload } of fields) {
+    for (const { payload: p } of fields) {
+      const payload = p as SchemaPayload;
       lines.push(`- **${payload.field_name}** (${payload.field_label})`);
       lines.push(`  → many2one FK to ${targetModel}`);
     }

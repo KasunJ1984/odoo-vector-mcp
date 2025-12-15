@@ -141,6 +141,7 @@ export interface SchemaFilter {
   field_type?: string | string[];         // Filter by type(s) (e.g., "many2one" or ["many2one", "one2many"])
   stored_only?: boolean;                  // Only stored fields
   primary_data_location_prefix?: string;  // Filter by primary_data_location prefix (for references_in)
+  point_type?: 'schema' | 'data' | 'all'; // Filter by point type (schema, data, or all)
 }
 
 /**
@@ -169,6 +170,28 @@ export interface SchemaPayload {
 
   // Sync metadata
   sync_timestamp: string;
+
+  // Type discriminator (added for unified search)
+  point_type?: 'schema';
+}
+
+/**
+ * Union type for any payload in the collection
+ */
+export type AnyPayload = SchemaPayload | DataPayload;
+
+/**
+ * Type guard to check if payload is DataPayload
+ */
+export function isDataPayload(payload: AnyPayload): payload is DataPayload {
+  return (payload as DataPayload).point_type === 'data';
+}
+
+/**
+ * Type guard to check if payload is SchemaPayload
+ */
+export function isSchemaPayload(payload: AnyPayload): payload is SchemaPayload {
+  return !isDataPayload(payload);
 }
 
 // =============================================================================
@@ -185,12 +208,12 @@ export interface SchemaPoint {
 }
 
 /**
- * Vector search result from Qdrant
+ * Vector search result from Qdrant (supports both schema and data)
  */
 export interface VectorSearchResult {
   id: number;
   score: number;
-  payload: SchemaPayload;
+  payload: AnyPayload;
 }
 
 // =============================================================================

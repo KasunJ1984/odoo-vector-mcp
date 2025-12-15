@@ -43,6 +43,7 @@ let misses = 0;
  * - model filter
  * - field type filters
  * - result limit
+ * - point type (schema, data, or all)
  */
 export function generateCacheKey(
   query: string,
@@ -50,7 +51,8 @@ export function generateCacheKey(
   modelName?: string,
   fieldTypes?: string[],
   limit?: number,
-  minSimilarity?: number
+  minSimilarity?: number,
+  pointType?: string
 ): string {
   return JSON.stringify({
     query: query.toLowerCase().trim(),
@@ -59,6 +61,7 @@ export function generateCacheKey(
     fieldTypes: fieldTypes?.sort(),
     limit,
     minSimilarity,
+    pointType,
   });
 }
 

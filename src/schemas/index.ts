@@ -91,6 +91,17 @@ export const SemanticSearchSchema = z.object({
     .boolean()
     .default(false)
     .describe('Only show stored fields, exclude computed fields'),
+
+  /**
+   * Filter by point type: schema, data, or all
+   * - schema: Search field definitions (default)
+   * - data: Search actual CRM records
+   * - all: Search both schema and data together
+   */
+  point_type: z
+    .enum(['schema', 'data', 'all'])
+    .default('schema')
+    .describe('Point type: schema=field definitions, data=CRM records, all=both'),
 }).strict();
 
 /**
@@ -206,6 +217,56 @@ export const PreviewEncodingSchema = z.object({
 export type PreviewEncodingInput = z.infer<typeof PreviewEncodingSchema>;
 
 // =============================================================================
+// SEARCH DATA SCHEMA (Phase 2 - Data Search)
+// =============================================================================
+
+/**
+ * Schema for search_data tool input
+ *
+ * Searches synced Odoo data records semantically.
+ */
+export const SearchDataSchema = z.object({
+  /**
+   * Natural language query to search data
+   * Examples:
+   * - "Hospital projects in Victoria"
+   * - "High value opportunities over 500000"
+   * - "Leads from Hansen Yuncken"
+   */
+  query: z
+    .string()
+    .min(1, 'Query must be at least 1 character')
+    .max(500, 'Query must be at most 500 characters')
+    .describe('Natural language query to search CRM data'),
+
+  /**
+   * Maximum number of results to return
+   */
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .default(10)
+    .describe('Maximum number of results (1-100, default: 10)'),
+
+  /**
+   * Minimum similarity score (0-1)
+   */
+  min_similarity: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.3)
+    .describe('Minimum similarity score (0-1, default: 0.3)'),
+}).strict();
+
+/**
+ * Inferred type from schema
+ */
+export type SearchDataInput = z.infer<typeof SearchDataSchema>;
+
+// =============================================================================
 // EXPORT ALL SCHEMAS
 // =============================================================================
 
@@ -214,4 +275,5 @@ export const schemas = {
   SyncSchema,
   TransformDataSchema,
   PreviewEncodingSchema,
+  SearchDataSchema,
 };
