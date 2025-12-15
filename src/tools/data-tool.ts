@@ -150,7 +150,7 @@ Run schema sync first if needed.
           // Show restricted fields if any
           if (result.restricted_fields && result.restricted_fields.length > 0) {
             lines.push(``);
-            lines.push(`API Restrictions (${result.restricted_fields.length} fields):`);
+            lines.push(`Field Restrictions (${result.restricted_fields.length} fields):`);
             lines.push(`----------------------------------------`);
 
             // Group by reason
@@ -161,13 +161,25 @@ Run schema sync first if needed.
               byReason.set(field.reason, list);
             }
 
-            for (const [reason, fields] of byReason) {
-              lines.push(`${reason}: ${fields.join(', ')}`);
+            // Show API restrictions first
+            const apiReasons = ['security_restriction', 'compute_error', 'unknown'];
+            for (const reason of apiReasons) {
+              const fields = byReason.get(reason);
+              if (fields && fields.length > 0) {
+                lines.push(`${reason}: ${fields.join(', ')}`);
+              }
+            }
+
+            // Show Odoo errors separately
+            const odooFields = byReason.get('odoo_error');
+            if (odooFields && odooFields.length > 0) {
+              lines.push(``);
+              lines.push(`Odoo Errors (${odooFields.length} fields):`);
+              lines.push(`odoo_error: ${odooFields.join(', ')}`);
             }
 
             lines.push(``);
-            lines.push(`NOTE: Restricted fields are encoded as "Restricted_from_API"`);
-            lines.push(`in the vector database. They will decode as "[API Restricted]".`);
+            lines.push(`NOTE: Restricted fields decode as "[API Restricted]" or "[Odoo Error]".`);
           }
         } else {
           lines.push(`Data Sync FAILED`);

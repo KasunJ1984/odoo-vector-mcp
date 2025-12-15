@@ -8,6 +8,8 @@
  * 1. Security restrictions: "The requested operation can not be completed due to
  *    security restrictions... Fields: - field_name (allowed for groups...)"
  * 2. Compute errors: "Compute method failed to assign model(ids,).field_name"
+ * 3. Singleton errors: "Expected singleton: model(1, 2, 4, ...)" - Odoo-side bugs
+ *    in computed fields that don't properly iterate over recordsets
  */
 
 // =============================================================================
@@ -16,8 +18,13 @@
 
 /**
  * Type of Odoo error detected
+ *
+ * - security_restriction: API permission error
+ * - compute_error: Compute method failed (includes field name)
+ * - singleton_error: Expected singleton bug (field name NOT in error)
+ * - unknown: Unrecognized pattern
  */
-export type OdooErrorType = 'security_restriction' | 'compute_error' | 'unknown';
+export type OdooErrorType = 'security_restriction' | 'compute_error' | 'singleton_error' | 'unknown';
 
 /**
  * Parsed Odoo error with extracted information
@@ -174,6 +181,21 @@ export function parseOdooError(errorMessage: string): OdooSecurityError {
         }
       }
     }
+
+    return result;
+  }
+
+  // Pattern 4: Singleton error (Odoo-side bug)
+  // "ValueError: Expected singleton: res.partner(1, 2, 4, 6, 18, 28, 31, 33, ...)"
+  // Note: This error does NOT include the field name - sequential exclusion needed
+  const singletonPattern = /Expected singleton:\s*([a-z_]+(?:\.[a-z_]+)*)\s*\(/i;
+  const singletonMatch = normalizedMessage.match(singletonPattern);
+  if (singletonMatch) {
+    result.type = 'singleton_error';
+    result.model = singletonMatch[1].trim();
+    // Field name is NOT available in singleton errors
+    // The caller must use sequential exclusion to find the problematic field
+    return result;
   }
 
   return result;
@@ -197,9 +219,23 @@ export function isFieldRestrictionError(errorMessage: string): boolean {
     /permission denied/i,
     /not have.*permission/i,
     /allowed for groups/i,
+    /Expected singleton/i,  // Odoo-side bug in computed field
   ];
 
   return patterns.some(pattern => pattern.test(errorMessage));
+}
+
+/**
+ * Check if an error is specifically a singleton error (Odoo-side bug)
+ *
+ * Singleton errors require sequential field exclusion since the error
+ * doesn't tell us which field caused it.
+ *
+ * @param errorMessage - The error message to check
+ * @returns true if this is a singleton error
+ */
+export function isSingletonError(errorMessage: string): boolean {
+  return /Expected singleton/i.test(errorMessage);
 }
 
 /**

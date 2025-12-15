@@ -24,6 +24,7 @@ import { ODOO_CONFIG } from '../constants.js';
 import {
   parseOdooError,
   isFieldRestrictionError,
+  isSingletonError,
 } from '../utils/odoo-error-parser.js';
 
 // Timeout for API calls (30 seconds)
@@ -288,6 +289,66 @@ export class OdooClient {
         // Parse the error to extract restricted field names
         const parsed = parseOdooError(errorMessage);
 
+        // Handle singleton errors with sequential exclusion
+        // Singleton errors don't tell us which field caused the problem
+        if (parsed.type === 'singleton_error' && parsed.restrictedFields.length === 0) {
+          console.error(`[${model}] Singleton error detected - starting sequential exclusion`);
+          warnings.push(`Singleton error in ${model} - using sequential exclusion to find problematic field`);
+
+          // Try removing fields one by one to find the culprit
+          const fieldsToTest = [...currentFields];
+          let foundProblemField = false;
+
+          for (const fieldToRemove of fieldsToTest) {
+            const testFields = currentFields.filter(f => f !== fieldToRemove);
+
+            if (testFields.length === 0) continue;
+
+            try {
+              // Try with this field removed
+              const testRecords = await this.searchRead<T>(model, domain, testFields, options);
+
+              // Success! This field was the problem
+              foundProblemField = true;
+              currentFields = testFields;
+              restrictedFields.push(fieldToRemove);
+
+              const warning = `[${model}] Field '${fieldToRemove}' causes singleton error (odoo_error) - removed from query`;
+              warnings.push(warning);
+              console.error(warning);
+
+              // Notify callback with 'odoo_error' reason
+              if (onFieldRestricted) {
+                onFieldRestricted(fieldToRemove, 'odoo_error');
+              }
+
+              // Return successful result
+              return {
+                records: testRecords,
+                restrictedFields,
+                retryCount: retryCount + 1,
+                warnings,
+              };
+            } catch (testError) {
+              // Still failing - try next field
+              const testMsg = testError instanceof Error ? testError.message : String(testError);
+              if (isSingletonError(testMsg)) {
+                // Still a singleton error, continue testing
+                continue;
+              }
+              // Different error - might need different handling
+              // For now, continue testing
+            }
+          }
+
+          if (!foundProblemField) {
+            // Couldn't find the problem field through exclusion
+            warnings.push(`Could not identify singleton error field through sequential exclusion`);
+            throw error;
+          }
+        }
+
+        // Standard handling for errors with known field names
         if (parsed.restrictedFields.length === 0) {
           // Couldn't extract field names - re-throw original error
           warnings.push(`Could not parse restricted fields from error: ${errorMessage}`);

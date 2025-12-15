@@ -42,6 +42,17 @@ import type {
  */
 export const RESTRICTED_FIELD_MARKER = 'Restricted_from_API';
 
+/**
+ * Marker value for fields that fail due to Odoo-side bugs
+ *
+ * When a field causes an Odoo error (e.g., singleton error in computed field),
+ * we encode it with this marker instead of failing the sync.
+ *
+ * Encoded format: prefix*Restricted_odoo_error
+ * Display format: [Odoo Error]
+ */
+export const ODOO_ERROR_MARKER = 'Restricted_odoo_error';
+
 // =============================================================================
 // SCHEMA VALIDATION
 // =============================================================================
@@ -236,8 +247,10 @@ export function encodeRecord(
   for (const [fieldName, fieldInfo] of Object.entries(encodingMap)) {
     // Check if this field is restricted
     if (context?.restricted_fields.has(fieldName)) {
-      // Encode restricted fields with the marker
-      parts.push(`${fieldInfo.prefix}*${RESTRICTED_FIELD_MARKER}`);
+      // Encode restricted fields with the appropriate marker based on reason
+      const reason = context.restricted_fields.get(fieldName);
+      const marker = reason === 'odoo_error' ? ODOO_ERROR_MARKER : RESTRICTED_FIELD_MARKER;
+      parts.push(`${fieldInfo.prefix}*${marker}`);
       continue;
     }
 
@@ -547,6 +560,11 @@ export function formatDisplayValue(
   // Handle restricted field marker
   if (rawValue === RESTRICTED_FIELD_MARKER) {
     return '[API Restricted]';
+  }
+
+  // Handle Odoo error marker
+  if (rawValue === ODOO_ERROR_MARKER) {
+    return '[Odoo Error]';
   }
 
   // Handle empty/false values

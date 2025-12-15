@@ -384,8 +384,13 @@ export interface DataSyncResult {
 
 /**
  * Reason why a field is restricted from API access
+ *
+ * - security_restriction: Odoo ACL blocks field access
+ * - compute_error: Odoo compute method failed (e.g., "Compute method failed to assign")
+ * - odoo_error: Odoo-side bug (e.g., singleton error in computed field)
+ * - unknown: Unrecognized error pattern
  */
-export type FieldRestrictionReason = 'security_restriction' | 'compute_error' | 'unknown';
+export type FieldRestrictionReason = 'security_restriction' | 'compute_error' | 'odoo_error' | 'unknown';
 
 /**
  * Information about a restricted field
@@ -411,8 +416,8 @@ export interface FieldRestriction {
 export interface EncodingContext {
   /** Model being encoded */
   model_name: string;
-  /** Set of field names that couldn't be fetched due to restrictions */
-  restricted_fields: Set<string>;
+  /** Map of field names to restriction reasons */
+  restricted_fields: Map<string, FieldRestrictionReason>;
 }
 
 /**

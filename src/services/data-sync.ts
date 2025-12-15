@@ -304,9 +304,8 @@ export async function syncModelData(
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  // Track restricted fields discovered during sync
+  // Track restricted fields discovered during sync (Map: field → reason)
   const restrictedFieldsMap = new Map<string, FieldRestrictionReason>();
-  const restrictedFieldsSet = new Set<string>();
 
   // Validate services are available
   if (!isEmbeddingServiceAvailable()) {
@@ -388,15 +387,15 @@ export async function syncModelData(
         maxRetries: 5,
         onFieldRestricted: (field, reason) => {
           restrictedFieldsMap.set(field, reason);
-          restrictedFieldsSet.add(field);
-          warnings.push(`Field '${field}' restricted (${reason}) - will be marked as Restricted_from_API`);
+          const marker = reason === 'odoo_error' ? 'Restricted_odoo_error' : 'Restricted_from_API';
+          warnings.push(`Field '${field}' restricted (${reason}) - will be marked as ${marker}`);
         },
       }
     );
 
     // Update field list with any restrictions found during sample fetch
     if (sampleResult.restrictedFields.length > 0) {
-      currentFieldsToFetch = currentFieldsToFetch.filter(f => !restrictedFieldsSet.has(f));
+      currentFieldsToFetch = currentFieldsToFetch.filter(f => !restrictedFieldsMap.has(f));
       console.error(`[DataSync] Found ${sampleResult.restrictedFields.length} restricted fields during sample fetch`);
     }
 
@@ -442,10 +441,10 @@ export async function syncModelData(
 
     console.error(`[DataSync] Schema validation passed: ${validation.matched_fields.length} fields matched`);
 
-    // Build encoding context with restricted fields
+    // Build encoding context with restricted fields (Map: field → reason)
     const encodingContext: EncodingContext = {
       model_name: config.model_name,
-      restricted_fields: restrictedFieldsSet,
+      restricted_fields: restrictedFieldsMap,
     };
 
     // Ensure indexes exist for data points
@@ -462,8 +461,8 @@ export async function syncModelData(
       : await client.searchCount(config.model_name, domain, context);
 
     console.error(`[DataSync] Starting streaming sync of ${totalRecords} records`);
-    if (restrictedFieldsSet.size > 0) {
-      console.error(`[DataSync] Excluding ${restrictedFieldsSet.size} restricted fields from fetch`);
+    if (restrictedFieldsMap.size > 0) {
+      console.error(`[DataSync] Excluding ${restrictedFieldsMap.size} restricted fields from fetch`);
     }
     onProgress?.('streaming', 0, totalRecords);
 
@@ -485,10 +484,10 @@ export async function syncModelData(
           maxRetries: 5,
           onFieldRestricted: (field, reason) => {
             // New restriction found during batch - add to tracking
-            if (!restrictedFieldsSet.has(field)) {
+            if (!restrictedFieldsMap.has(field)) {
               restrictedFieldsMap.set(field, reason);
-              restrictedFieldsSet.add(field);
-              warnings.push(`Field '${field}' restricted (${reason}) - discovered during batch at offset ${offset}`);
+              const marker = reason === 'odoo_error' ? 'Restricted_odoo_error' : 'Restricted_from_API';
+              warnings.push(`Field '${field}' restricted (${reason}) - discovered during batch at offset ${offset}, marked as ${marker}`);
               console.error(`[DataSync] New restricted field discovered: ${field} (${reason})`);
             }
           },
@@ -496,10 +495,9 @@ export async function syncModelData(
       );
 
       // Update field list if new restrictions found
-      if (batchResult.restrictedFields.some(f => !currentFieldsToFetch.includes(f) === false)) {
-        currentFieldsToFetch = currentFieldsToFetch.filter(f => !restrictedFieldsSet.has(f));
-        // Update encoding context with new restrictions
-        encodingContext.restricted_fields = restrictedFieldsSet;
+      if (batchResult.restrictedFields.length > 0) {
+        currentFieldsToFetch = currentFieldsToFetch.filter(f => !restrictedFieldsMap.has(f));
+        // Encoding context already references the Map, so it's updated automatically
       }
 
       const batch = batchResult.records;
@@ -560,8 +558,8 @@ export async function syncModelData(
     onProgress?.('complete', totalEmbedded, totalRecords);
     console.error(`[DataSync] Complete: ${totalEmbedded}/${totalProcessed} records embedded`);
 
-    if (restrictedFieldsSet.size > 0) {
-      console.error(`[DataSync] Restricted fields (${restrictedFieldsSet.size}): ${Array.from(restrictedFieldsSet).join(', ')}`);
+    if (restrictedFieldsMap.size > 0) {
+      console.error(`[DataSync] Restricted fields (${restrictedFieldsMap.size}): ${Array.from(restrictedFieldsMap.keys()).join(', ')}`);
     }
 
     // Build restricted fields array for result
