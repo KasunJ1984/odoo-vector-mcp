@@ -8,6 +8,7 @@
 import { SYNC_CONFIG, QDRANT_CONFIG } from '../constants.js';
 import { loadSchema, buildSemanticText, clearSchemaCache } from './schema-loader.js';
 import { embed, embedBatch, isEmbeddingServiceAvailable } from './embedding-service.js';
+import { clearCache } from './cache-service.js';
 import {
   createSchemaCollection,
   upsertSchemaPoints,
@@ -190,6 +191,10 @@ export async function syncSchemaToQdrant(
 
     // Update last sync time
     lastSyncTime = new Date().toISOString();
+
+    // Clear query cache to ensure fresh results with new data
+    clearCache();
+
     console.error(`[SchemaSync] Sync complete: ${uploaded} uploaded, ${failed} failed`);
 
     return {

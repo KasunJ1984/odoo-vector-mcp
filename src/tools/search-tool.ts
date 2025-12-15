@@ -17,6 +17,7 @@ import { searchSchemaCollection, scrollSchemaCollection, isVectorClientAvailable
 import { syncSchemaToQdrant, getSyncStatus } from '../services/schema-sync.js';
 import { getSchemaStats, getAllModelNames } from '../services/schema-loader.js';
 import { QDRANT_CONFIG } from '../constants.js';
+import { generateCacheKey, getCached, setCache, getCacheStats } from '../services/cache-service.js';
 
 // =============================================================================
 // TOOL REGISTRATION
@@ -219,6 +220,27 @@ ${suggestions.length > 0 ? `**Did you mean:**\n${suggestions.map(s => `- ${s}`).
         }
 
         // MODE: SEMANTIC (default) - Vector similarity search
+
+        // Check cache first (saves embedding API call + vector search)
+        const cacheKey = generateCacheKey(
+          input.query,
+          'semantic',
+          input.model_filter,
+          input.type_filter ? [input.type_filter] : undefined,
+          input.limit,
+          input.min_similarity
+        );
+
+        const cachedResults = getCached(cacheKey);
+        if (cachedResults) {
+          // Cache hit - return cached results directly
+          const output = formatSearchResults(input.query, cachedResults);
+          return {
+            content: [{ type: 'text', text: output + '\n\n*📦 Results from cache*' }],
+          };
+        }
+
+        // Cache miss - proceed with embedding and search
         if (!isEmbeddingServiceAvailable()) {
           return {
             content: [{
@@ -258,6 +280,9 @@ Try:
             }],
           };
         }
+
+        // Store in cache for future queries
+        setCache(cacheKey, results);
 
         // Format results
         const output = formatSearchResults(input.query, results);
@@ -299,6 +324,7 @@ Try:
           // Get status
           const status = await getSyncStatus();
           const stats = getSchemaStats();
+          const cacheStats = getCacheStats();
 
           return {
             content: [{
@@ -314,6 +340,11 @@ Try:
 - Models: ${stats.models}
 - Stored Fields: ${stats.storedCount.toLocaleString()}
 - Computed Fields: ${stats.computedCount.toLocaleString()}
+
+**Query Cache:**
+- Enabled: ${cacheStats.enabled ? 'Yes' : 'No'}
+- Entries: ${cacheStats.size}/${cacheStats.maxSize}
+- Hit Rate: ${cacheStats.hitRate} (${cacheStats.hits} hits, ${cacheStats.misses} misses)
 
 **Field Types:**
 ${Object.entries(stats.fieldTypes)

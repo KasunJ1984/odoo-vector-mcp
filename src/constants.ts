@@ -146,3 +146,20 @@ export const SEARCH_DEFAULTS = {
   MAX_LIMIT: 50,               // Maximum results per query
   MIN_SIMILARITY: 0.5,         // Default minimum similarity
 } as const;
+
+// =============================================================================
+// CACHE CONFIGURATION
+// =============================================================================
+
+/**
+ * LRU Query Cache configuration
+ *
+ * Caches search results to avoid redundant Qdrant queries.
+ * Especially valuable with scalar quantization (rescore overhead).
+ * Cleared automatically after schema sync.
+ */
+export const CACHE_CONFIG = {
+  MAX_ENTRIES: parseInt(process.env.CACHE_MAX_ENTRIES || '500', 10),
+  TTL_MS: parseInt(process.env.CACHE_TTL_MS || '1800000', 10), // 30 minutes
+  ENABLED: process.env.CACHE_ENABLED !== 'false',
+} as const;
