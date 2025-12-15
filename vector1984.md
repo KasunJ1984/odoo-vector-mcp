@@ -25,7 +25,7 @@ This document tracks incremental improvements to the Odoo Vector MCP server. Eac
 | # | Improvement | Status | Date Completed | Notes |
 |---|-------------|--------|----------------|-------|
 | 0 | Bug Fixes (references_in, error logging) | ✅ DONE | Dec 2024 | Commits: 578e5e1, 7a840d4, f57c6c5 |
-| 1 | Scalar Quantization | 🔲 TODO | - | 75% memory reduction |
+| 1 | Scalar Quantization | ✅ DONE | Dec 15, 2024 | Commit: 721341d - 75% memory reduction verified |
 | 2 | Query Caching (LRU) | 🔲 TODO | - | Faster repeat queries |
 | 3 | HNSW Parameter Tuning | 🔲 TODO | - | Better recall |
 | 4 | Upgrade to Voyage-3.5 | 🔲 TODO | - | Better embeddings |
@@ -1397,7 +1397,7 @@ ENABLE_HYDE=false
 | Date | Improvement | Status | Notes |
 |------|-------------|--------|-------|
 | Dec 2024 | Bug fixes (references_in, logging) | ✅ Done | Commits: 578e5e1, 7a840d4, f57c6c5 |
-| | #1 Scalar Quantization | 🔲 Pending | |
+| Dec 15, 2024 | #1 Scalar Quantization | ✅ Done | Commit: 721341d - int8 quantization, rescore params |
 | | #2 Query Caching | 🔲 Pending | |
 | | #3 HNSW Tuning | 🔲 Pending | |
 | | #4 Voyage-3.5 | 🔲 Pending | |
