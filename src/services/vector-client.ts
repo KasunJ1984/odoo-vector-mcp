@@ -95,11 +95,20 @@ export async function createSchemaCollection(): Promise<boolean> {
     distance: QDRANT_CONFIG.DISTANCE_METRIC,
   };
 
+  // Build HNSW config (tuned for 150K+ vectors in single collection)
+  // m=32: More connections per node for better recall at scale
+  // ef_construct=200: Higher build quality (one-time cost)
+  const hnswConfig = {
+    m: QDRANT_CONFIG.HNSW_M,
+    ef_construct: QDRANT_CONFIG.HNSW_EF_CONSTRUCT,
+  };
+
   // Add scalar quantization if enabled (default: true)
   // This reduces memory by 75% with minimal accuracy loss
   if (QDRANT_CONFIG.ENABLE_SCALAR_QUANTIZATION) {
     await qdrantClient.createCollection(QDRANT_CONFIG.COLLECTION, {
       vectors: vectorsConfig,
+      hnsw_config: hnswConfig,
       quantization_config: {
         scalar: {
           type: 'int8' as const,
@@ -109,11 +118,14 @@ export async function createSchemaCollection(): Promise<boolean> {
       },
     });
     console.error('[Vector] Scalar quantization ENABLED (75% memory reduction)');
+    console.error(`[Vector] HNSW config: m=${hnswConfig.m}, ef_construct=${hnswConfig.ef_construct}`);
   } else {
     await qdrantClient.createCollection(QDRANT_CONFIG.COLLECTION, {
       vectors: vectorsConfig,
+      hnsw_config: hnswConfig,
     });
     console.error('[Vector] Scalar quantization DISABLED');
+    console.error(`[Vector] HNSW config: m=${hnswConfig.m}, ef_construct=${hnswConfig.ef_construct}`);
   }
 
   // Create payload indexes for efficient filtering
@@ -216,7 +228,8 @@ export async function searchSchemaCollection(
   const qdrantFilter = filter ? buildQdrantFilter(filter) : undefined;
 
   try {
-    // Build search params - add quantization rescore if enabled
+    // Build search params - add HNSW ef and quantization rescore if enabled
+    // hnsw_ef: Controls search-time exploration (higher = better recall, slower)
     // Rescoring re-ranks results using full vectors for accuracy
     const searchParams: {
       vector: number[];
@@ -224,7 +237,7 @@ export async function searchSchemaCollection(
       score_threshold: number;
       filter?: object;
       with_payload: boolean;
-      params?: { quantization?: { rescore: boolean; oversampling: number } };
+      params?: { hnsw_ef?: number; quantization?: { rescore: boolean; oversampling: number } };
     } = {
       vector,
       limit,
@@ -233,13 +246,16 @@ export async function searchSchemaCollection(
       with_payload: true,
     };
 
+    // Add HNSW search param (ef=128 for better recall)
+    searchParams.params = {
+      hnsw_ef: QDRANT_CONFIG.HNSW_EF_SEARCH,
+    };
+
     // Add quantization search params for rescoring (improves accuracy)
     if (QDRANT_CONFIG.ENABLE_SCALAR_QUANTIZATION && QDRANT_CONFIG.SEARCH_RESCORE) {
-      searchParams.params = {
-        quantization: {
-          rescore: true, // Re-rank using full float32 vectors
-          oversampling: QDRANT_CONFIG.SEARCH_OVERSAMPLING, // Fetch extra, keep best
-        },
+      searchParams.params.quantization = {
+        rescore: true, // Re-rank using full float32 vectors
+        oversampling: QDRANT_CONFIG.SEARCH_OVERSAMPLING, // Fetch extra, keep best (2.0x)
       };
     }
 

@@ -35,7 +35,14 @@ export const QDRANT_CONFIG = {
   SCALAR_QUANTILE: parseFloat(process.env.SCALAR_QUANTILE || '0.99'),
   // Search optimization params for quantized vectors
   SEARCH_RESCORE: process.env.SEARCH_RESCORE !== 'false',
-  SEARCH_OVERSAMPLING: parseFloat(process.env.SEARCH_OVERSAMPLING || '1.5'),
+  SEARCH_OVERSAMPLING: parseFloat(process.env.SEARCH_OVERSAMPLING || '2.0'),
+  // HNSW Configuration (tuned for 150K+ vectors in single collection)
+  // m: connections per node - higher = better recall, more memory
+  // ef_construct: build-time quality - one-time cost
+  // ef_search: query-time exploration - higher = better recall, slower
+  HNSW_M: parseInt(process.env.HNSW_M || '32', 10),
+  HNSW_EF_CONSTRUCT: parseInt(process.env.HNSW_EF_CONSTRUCT || '200', 10),
+  HNSW_EF_SEARCH: parseInt(process.env.HNSW_EF_SEARCH || '128', 10),
 } as const;
 
 /**
@@ -43,7 +50,7 @@ export const QDRANT_CONFIG = {
  */
 export const VOYAGE_CONFIG = {
   API_KEY: process.env.VOYAGE_API_KEY || '',
-  MODEL: process.env.EMBEDDING_MODEL || 'voyage-3-lite',
+  MODEL: process.env.EMBEDDING_MODEL || 'voyage-3.5-lite',
   DIMENSIONS: parseInt(process.env.VECTOR_SIZE || process.env.EMBEDDING_DIMENSIONS || '512', 10),
   MAX_BATCH_SIZE: 128,
   INPUT_TYPE_DOCUMENT: 'document' as const,
