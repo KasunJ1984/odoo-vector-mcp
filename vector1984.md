@@ -10,13 +10,16 @@
 
 This document tracks incremental improvements to the Odoo Vector MCP server. Each improvement builds on previous ones, with detailed plans, test scenarios, and to-do lists.
 
-**Current System Baseline:**
+**Current System Baseline (Post-Improvements #1-5):**
 - 17,930 schema fields indexed
 - 709 Odoo models
-- 1024-dimensional Voyage-3 embeddings (float32)
+- 1024-dimensional Voyage-3.5-lite embeddings
 - Qdrant Cloud (AWS ap-southeast-2)
-- Memory: ~73.5 MB vectors
-- Sync time: ~40-75 seconds full sync
+- Scalar quantization: int8 (75% memory reduction)
+- HNSW: m=32, ef_construct=200, ef_search=128
+- Query cache: LRU 500 entries, 30min TTL
+- Incremental sync: Checksum-based change detection
+- Sync time: ~280 seconds full sync (one-time)
 
 ---
 
@@ -27,8 +30,8 @@ This document tracks incremental improvements to the Odoo Vector MCP server. Eac
 | 0 | Bug Fixes (references_in, error logging) | ✅ DONE | Dec 2024 | Commits: 578e5e1, 7a840d4, f57c6c5 |
 | 1 | Scalar Quantization | ✅ DONE | Dec 15, 2024 | Commit: 721341d - 75% memory reduction verified |
 | 2 | Query Caching (LRU) | ✅ DONE | Dec 15, 2024 | Commit: b2b28fa - 6/6 tests passed |
-| 3 | HNSW Parameter Tuning | 🔲 TODO | - | Better recall |
-| 4 | Upgrade to Voyage-3.5 | 🔲 TODO | - | Better embeddings |
+| 3 | HNSW Parameter Tuning | ✅ DONE | Dec 15, 2024 | Commit: b702d14 - m=32, ef_construct=200, ef_search=128 |
+| 4 | Upgrade to Voyage-3.5 | ✅ DONE | Dec 15, 2024 | Commit: b702d14 - voyage-3.5-lite, bundled with #3 |
 | 5 | Incremental Sync | ✅ DONE | Dec 15, 2024 | Commit: e743e2e - Checksum-based change detection |
 | 6 | Reranking Layer | 🔲 TODO | - | Higher accuracy |
 | 7 | Binary Quantization | 🔲 TODO | - | 32x compression |
@@ -1400,8 +1403,8 @@ ENABLE_HYDE=false
 | Dec 15, 2024 | #1 Scalar Quantization | ✅ Done | Commit: 721341d - int8 quantization, rescore params |
 | Dec 15, 2024 | #2 Query Caching | ✅ Done | Commit: b2b28fa - LRU cache, 500 entries, 30min TTL |
 | Dec 15, 2024 | #5 Incremental Sync | ✅ Done | Commit: e743e2e - Checksum-based change detection, cache-aware |
-| | #3 HNSW Tuning | 🔲 Pending | |
-| | #4 Voyage-3.5 | 🔲 Pending | |
+| Dec 15, 2024 | #3 HNSW Tuning | ✅ Done | Commit: b702d14 - m=32, ef_construct=200, ef_search=128 |
+| Dec 15, 2024 | #4 Voyage-3.5 | ✅ Done | Commit: b702d14 - Bundled with #3, voyage-3.5-lite, 7/7 tests passed |
 | | #6 Reranking | 🔲 Pending | |
 | | #7 Binary Quantization | 🔲 Pending | |
 | | #8 HyDE | 🔲 Pending | |
@@ -1411,4 +1414,4 @@ ENABLE_HYDE=false
 ---
 
 *Document created: December 2024*
-*Last updated: December 2024*
+*Last updated: December 15, 2024 - Improvements #3 and #4 completed*
