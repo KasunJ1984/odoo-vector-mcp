@@ -289,63 +289,67 @@ export class OdooClient {
         // Parse the error to extract restricted field names
         const parsed = parseOdooError(errorMessage);
 
-        // Handle singleton errors with sequential exclusion
+        // Handle singleton errors with INDIVIDUAL field testing
         // Singleton errors don't tell us which field caused the problem
+        // We test each field individually with a safe base ['id'] to find ALL problematic fields
         if (parsed.type === 'singleton_error' && parsed.restrictedFields.length === 0) {
-          console.error(`[${model}] Singleton error detected - starting sequential exclusion`);
-          warnings.push(`Singleton error in ${model} - using sequential exclusion to find problematic field`);
+          console.error(`[${model}] Singleton error detected - testing fields individually`);
+          warnings.push(`Singleton error in ${model} - testing each field individually`);
 
-          // Try removing fields one by one to find the culprit
-          const fieldsToTest = [...currentFields];
-          let foundProblemField = false;
+          // Test each field individually against a safe base
+          const safeFields: string[] = ['id']; // 'id' is always safe
+          const problematicFields: string[] = [];
 
-          for (const fieldToRemove of fieldsToTest) {
-            const testFields = currentFields.filter(f => f !== fieldToRemove);
-
-            if (testFields.length === 0) continue;
+          // Test each non-id field individually
+          for (const fieldToTest of currentFields) {
+            if (fieldToTest === 'id') continue; // Skip id, it's our safe base
 
             try {
-              // Try with this field removed
-              const testRecords = await this.searchRead<T>(model, domain, testFields, options);
+              // Test this single field with 'id' and limit=1
+              const testOptions = { ...options, limit: 1 };
+              await this.searchRead<T>(model, domain, ['id', fieldToTest], testOptions);
 
-              // Success! This field was the problem
-              foundProblemField = true;
-              currentFields = testFields;
-              restrictedFields.push(fieldToRemove);
-
-              const warning = `[${model}] Field '${fieldToRemove}' causes singleton error (odoo_error) - removed from query`;
-              warnings.push(warning);
-              console.error(warning);
-
-              // Notify callback with 'odoo_error' reason
-              if (onFieldRestricted) {
-                onFieldRestricted(fieldToRemove, 'odoo_error');
-              }
-
-              // Return successful result
-              return {
-                records: testRecords,
-                restrictedFields,
-                retryCount: retryCount + 1,
-                warnings,
-              };
+              // Success - this field is safe
+              safeFields.push(fieldToTest);
             } catch (testError) {
-              // Still failing - try next field
               const testMsg = testError instanceof Error ? testError.message : String(testError);
+
               if (isSingletonError(testMsg)) {
-                // Still a singleton error, continue testing
-                continue;
+                // This field causes singleton error
+                problematicFields.push(fieldToTest);
+
+                const warning = `[${model}] Field '${fieldToTest}' causes singleton error (odoo_error)`;
+                warnings.push(warning);
+                console.error(warning);
+
+                // Notify callback
+                if (onFieldRestricted) {
+                  onFieldRestricted(fieldToTest, 'odoo_error');
+                }
+              } else {
+                // Different error - assume field is safe but log warning
+                safeFields.push(fieldToTest);
+                warnings.push(`[${model}] Field '${fieldToTest}' had non-singleton error: ${testMsg.slice(0, 100)}`);
               }
-              // Different error - might need different handling
-              // For now, continue testing
             }
           }
 
-          if (!foundProblemField) {
-            // Couldn't find the problem field through exclusion
-            warnings.push(`Could not identify singleton error field through sequential exclusion`);
+          if (problematicFields.length === 0) {
+            // No individual field caused the error - might be a combination issue
+            warnings.push(`Could not identify problematic fields through individual testing`);
             throw error;
           }
+
+          // Update state with all problematic fields found
+          restrictedFields.push(...problematicFields);
+          currentFields = safeFields;
+
+          console.error(`[${model}] Found ${problematicFields.length} problematic field(s): ${problematicFields.join(', ')}`);
+          console.error(`[${model}] Continuing with ${safeFields.length} safe fields`);
+
+          // Retry with safe fields only
+          retryCount++;
+          continue; // Go back to main while loop to retry
         }
 
         // Standard handling for errors with known field names
