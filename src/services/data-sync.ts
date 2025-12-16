@@ -28,6 +28,7 @@ import {
   findMaxWriteDate,
 } from './sync-metadata.js';
 import { addToDLQ } from './dlq.js';
+import { logInfo, logWarn, logError, generateSyncId } from './logger.js';
 import { DATA_TRANSFORM_CONFIG, QDRANT_CONFIG } from '../constants.js';
 import type {
   DataTransformConfig,
@@ -86,26 +87,33 @@ const MEMORY_CRITICAL_THRESHOLD_MB = 768; // Critical warning threshold
  * - heapTotal: Total heap size allocated
  * - external: Memory used by C++ objects bound to JS
  * - rss: Resident Set Size (total memory allocated for process)
+ *
+ * @param syncId - Unique sync ID for log correlation
+ * @param modelName - Model being synced
+ * @param phase - Current phase (e.g., 'start', 'complete')
+ * @param batchNumber - Optional batch number
  */
-function logMemoryUsage(context: string, batchNumber?: number): void {
+function logMemoryUsage(syncId: string, modelName: string, phase: string, batchNumber?: number): void {
   const mem = process.memoryUsage();
   const heapUsedMB = Math.round(mem.heapUsed / 1024 / 1024);
   const heapTotalMB = Math.round(mem.heapTotal / 1024 / 1024);
   const rssMB = Math.round(mem.rss / 1024 / 1024);
 
   // Determine log level based on heap usage
-  let level = 'info';
-  if (heapUsedMB >= MEMORY_CRITICAL_THRESHOLD_MB) {
-    level = 'CRITICAL';
-  } else if (heapUsedMB >= MEMORY_WARNING_THRESHOLD_MB) {
-    level = 'WARNING';
-  }
+  const isWarning = heapUsedMB >= MEMORY_WARNING_THRESHOLD_MB;
+  const isCritical = heapUsedMB >= MEMORY_CRITICAL_THRESHOLD_MB;
 
-  const batchInfo = batchNumber !== undefined ? ` batch=${batchNumber}` : '';
-  console.error(
-    `[Memory ${level}] ${context}${batchInfo}: ` +
-    `heap=${heapUsedMB}/${heapTotalMB}MB, rss=${rssMB}MB`
-  );
+  const logFn = isWarning ? logWarn : logInfo;
+  logFn('Memory check', {
+    sync_id: syncId,
+    model_name: modelName,
+    phase,
+    batch: batchNumber,
+    heap_mb: heapUsedMB,
+    heap_total_mb: heapTotalMB,
+    rss_mb: rssMB,
+    critical: isCritical || undefined,
+  });
 }
 
 /**
@@ -381,8 +389,17 @@ export async function syncModelData(
   onProgress?: ProgressCallback
 ): Promise<DataSyncResultWithRestrictions> {
   const startTime = Date.now();
+  const syncId = generateSyncId();
   const errors: string[] = [];
   const warnings: string[] = [];
+
+  // Structured log: Sync started
+  logInfo('Sync started', {
+    sync_id: syncId,
+    model_name: config.model_name,
+    incremental: config.incremental !== false,
+    force_full: config.force_full || false,
+  });
 
   // MEMORY OPTIMIZATION: Limit warnings array to prevent unbounded growth
   const MAX_WARNINGS = 100;
@@ -656,7 +673,7 @@ export async function syncModelData(
 
     // Memory monitoring - log at sync start
     let batchNumber = 0;
-    logMemoryUsage(`${config.model_name} sync start`);
+    logMemoryUsage(syncId, config.model_name, 'start');
 
     while (nextFetchPromise) {
       batchNumber++;
@@ -688,7 +705,16 @@ export async function syncModelData(
       // Process current batch (encode, embed, upsert)
       totalProcessed += batch.length;
       const fetchPct = Math.round((totalProcessed / totalRecords) * 100);
-      console.error(`[DataSync] Fetched batch: ${totalProcessed}/${totalRecords} records (${fetchPct}%)`);
+
+      // Structured log: Batch fetched
+      logInfo('Batch fetched', {
+        sync_id: syncId,
+        model_name: config.model_name,
+        batch: batchNumber,
+        records: totalProcessed,
+        total: totalRecords,
+        progress_pct: fetchPct,
+      });
 
       // MEMORY OPTIMIZATION: Track max write_date incrementally instead of storing all records
       const batchMaxWriteDate = findMaxWriteDate(batch);
@@ -700,7 +726,7 @@ export async function syncModelData(
 
       // Memory monitoring - log every N batches to track heap growth
       if (shouldLogMemory(batchNumber)) {
-        logMemoryUsage(config.model_name, batchNumber);
+        logMemoryUsage(syncId, config.model_name, 'batch', batchNumber);
       }
 
       // Step 2: Encode batch with restricted field markers
@@ -735,7 +761,16 @@ export async function syncModelData(
           totalEmbedded += embedChunk.length;
 
           const embedPct = Math.round((totalEmbedded / totalRecords) * 100);
-          console.error(`[DataSync] Embedded: ${totalEmbedded}/${totalRecords} records (${embedPct}%)`);
+
+          // Structured log: Batch embedded
+          logInfo('Batch embedded', {
+            sync_id: syncId,
+            model_name: config.model_name,
+            batch: batchNumber,
+            records: totalEmbedded,
+            total: totalRecords,
+            progress_pct: embedPct,
+          });
 
           // Update sync progress for concurrent sync tracking
           activeSyncs.set(config.model_name, { startTime, progress: embedPct, totalRecords });
@@ -760,16 +795,32 @@ export async function syncModelData(
           }
 
           addWarning(`Embed batch at offset ${currentBatchOffset + i} failed: ${errMsg} (${embedChunk.length} records sent to DLQ)`);
-          console.error(`[DataSync] Embed error (${embedChunk.length} records to DLQ):`, errMsg);
+
+          // Structured log: Embed failed
+          logError('Embed failed', {
+            sync_id: syncId,
+            model_name: config.model_name,
+            batch: batchNumber,
+            error: errMsg,
+            records_to_dlq: embedChunk.length,
+          });
         }
       }
     }
 
     onProgress?.('complete', totalEmbedded, totalRecords);
-    console.error(`[DataSync] Complete: ${totalEmbedded}/${totalProcessed} records embedded`);
+
+    // Structured log: Sync complete
+    logInfo('Sync complete', {
+      sync_id: syncId,
+      model_name: config.model_name,
+      records: totalEmbedded,
+      total: totalProcessed,
+      duration_ms: Date.now() - startTime,
+    });
 
     // Memory monitoring - log at sync end to verify no memory leak
-    logMemoryUsage(`${config.model_name} sync complete`, batchNumber);
+    logMemoryUsage(syncId, config.model_name, 'complete', batchNumber);
 
     if (restrictedFieldsMap.size > 0) {
       console.error(`[DataSync] Restricted fields (${restrictedFieldsMap.size}): ${Array.from(restrictedFieldsMap.keys()).join(', ')}`);
