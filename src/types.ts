@@ -431,6 +431,8 @@ export interface DataSyncResultWithRestrictions extends DataSyncResult {
   restricted_fields: FieldRestriction[];
   /** Warning messages about restrictions */
   warnings: string[];
+  /** Type of sync performed: 'full' or 'incremental' */
+  sync_type?: 'full' | 'incremental';
 }
 
 /**
@@ -491,6 +493,10 @@ export interface DataTransformConfig {
   include_archived?: boolean;
   /** Testing only: limit records for debugging */
   test_limit?: number;
+  /** If true, only sync records modified since last sync. Default: true */
+  incremental?: boolean;
+  /** If true, force full sync even if incremental is enabled. Default: false */
+  force_full?: boolean;
 }
 
 // =============================================================================

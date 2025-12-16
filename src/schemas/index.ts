@@ -203,6 +203,24 @@ export const TransformDataSchema = z.object({
     .min(1)
     .optional()
     .describe('TESTING ONLY: Limit records for debugging. Omit for full table sync.'),
+
+  /**
+   * Enable incremental sync (only sync new/updated records)
+   * Default: true - uses write_date filter to only sync changes
+   */
+  incremental: z
+    .boolean()
+    .default(true)
+    .describe('If true (default), only sync records modified since last sync'),
+
+  /**
+   * Force full sync even if incremental is enabled
+   * Use to re-sync all records after schema changes
+   */
+  force_full: z
+    .boolean()
+    .default(false)
+    .describe('If true, force full sync ignoring last sync timestamp'),
 }).strict();
 
 /**

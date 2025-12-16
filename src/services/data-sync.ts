@@ -22,6 +22,11 @@ import {
   getFieldsToFetch,
 } from './data-transformer.js';
 import { getSchemasByModel, getAllModelNames } from './schema-loader.js';
+import {
+  getLastDataSyncTimestamp,
+  saveDataSyncMetadata,
+  findMaxWriteDate,
+} from './sync-metadata.js';
 import { DATA_TRANSFORM_CONFIG, QDRANT_CONFIG } from '../constants.js';
 import type {
   DataTransformConfig,
@@ -426,11 +431,36 @@ export async function syncModelData(
     // Track fields we'll actually fetch (may be reduced if some are restricted)
     let currentFieldsToFetch = [...fieldsToFetch];
 
+    // Ensure write_date is fetched for incremental sync tracking
+    if (!currentFieldsToFetch.includes('write_date')) {
+      currentFieldsToFetch.push('write_date');
+    }
+
     // Build domain and context for queries
     const domain: unknown[] = [];
     const context: Record<string, unknown> = {};
     if (config.include_archived !== false) {
       context.active_test = false;
+    }
+
+    // ==========================================================================
+    // INCREMENTAL SYNC - Add write_date filter if previous sync exists
+    // ==========================================================================
+    let isIncremental = false;
+    const incrementalEnabled = config.incremental !== false; // Default: true
+    const forceFullSync = config.force_full === true;
+
+    if (incrementalEnabled && !forceFullSync) {
+      const lastSync = getLastDataSyncTimestamp(config.model_name);
+      if (lastSync) {
+        domain.push(['write_date', '>', lastSync]);
+        isIncremental = true;
+        console.error(`[DataSync] INCREMENTAL sync: fetching records modified after ${lastSync}`);
+      } else {
+        console.error(`[DataSync] No previous sync found, running FULL sync`);
+      }
+    } else if (forceFullSync) {
+      console.error(`[DataSync] FULL sync requested (force_full=true)`);
     }
 
     // Use resilient fetch for sample record to discover any restricted fields
@@ -530,6 +560,9 @@ export async function syncModelData(
     let totalEmbedded = 0;
     const maxRecords = config.test_limit || totalRecords;
 
+    // Track all processed records for finding max write_date (for incremental sync)
+    const allProcessedRecords: Record<string, unknown>[] = [];
+
     // ==========================================================================
     // ASYNC PIPELINE: Fetch batch N+1 while embedding batch N
     // This hides network latency by overlapping fetch and embed operations
@@ -591,6 +624,9 @@ export async function syncModelData(
       totalProcessed += batch.length;
       const fetchPct = Math.round((totalProcessed / totalRecords) * 100);
       console.error(`[DataSync] Fetched batch: ${totalProcessed}/${totalRecords} records (${fetchPct}%)`);
+
+      // Track records for incremental sync metadata
+      allProcessedRecords.push(...batch);
 
       // Step 2: Encode batch with restricted field markers
       const encodedBatch = transformRecords(batch, encodingMap, config, encodingContext);
@@ -654,6 +690,21 @@ export async function syncModelData(
       })
     );
 
+    // ==========================================================================
+    // SAVE INCREMENTAL SYNC METADATA
+    // ==========================================================================
+    if (totalEmbedded > 0) {
+      const maxWriteDate = findMaxWriteDate(allProcessedRecords);
+      if (maxWriteDate) {
+        saveDataSyncMetadata(
+          config.model_name,
+          maxWriteDate,
+          totalEmbedded,
+          Date.now() - startTime
+        );
+      }
+    }
+
     return {
       success: errors.length === 0,
       model_name: config.model_name,
@@ -664,6 +715,7 @@ export async function syncModelData(
       errors: errors.length > 0 ? errors : undefined,
       restricted_fields: restrictedFieldsResult,
       warnings,
+      sync_type: isIncremental ? 'incremental' : 'full',
     };
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);

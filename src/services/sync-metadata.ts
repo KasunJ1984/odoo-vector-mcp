@@ -296,3 +296,159 @@ export function formatChangesSummary(changes: ChangeSet): string {
 
   return parts.join(', ');
 }
+
+// =============================================================================
+// DATA SYNC METADATA (for incremental sync of Odoo records)
+// =============================================================================
+
+/**
+ * Data sync metadata stored between syncs
+ */
+interface DataSyncModelMetadata {
+  /** ISO timestamp when sync completed */
+  last_sync_timestamp: string;
+  /** Highest write_date seen in synced records */
+  last_max_write_date: string;
+  /** Number of records synced */
+  records_synced: number;
+  /** Sync duration in milliseconds */
+  sync_duration_ms: number;
+}
+
+interface DataSyncMetadataStore {
+  models: Record<string, DataSyncModelMetadata>;
+  version: number;
+}
+
+const DATA_SYNC_METADATA_FILE = path.join(METADATA_DIR, 'data_sync_metadata.json');
+
+/**
+ * Get the last write_date for incremental sync of a model
+ *
+ * @param modelName - Odoo model name (e.g., 'res.partner')
+ * @returns ISO date string of last_max_write_date, or null if never synced
+ */
+export function getLastDataSyncTimestamp(modelName: string): string | null {
+  if (!existsSync(DATA_SYNC_METADATA_FILE)) return null;
+
+  try {
+    const data: DataSyncMetadataStore = JSON.parse(readFileSync(DATA_SYNC_METADATA_FILE, 'utf-8'));
+    return data.models[modelName]?.last_max_write_date || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save data sync metadata for a model
+ *
+ * @param modelName - Odoo model name
+ * @param maxWriteDate - Highest write_date from synced records
+ * @param recordCount - Number of records synced
+ * @param durationMs - Sync duration in milliseconds
+ */
+export function saveDataSyncMetadata(
+  modelName: string,
+  maxWriteDate: string,
+  recordCount: number,
+  durationMs: number
+): void {
+  let data: DataSyncMetadataStore = { models: {}, version: 1 };
+
+  // Ensure data directory exists
+  if (!existsSync(METADATA_DIR)) {
+    mkdirSync(METADATA_DIR, { recursive: true });
+  }
+
+  // Load existing data if present
+  if (existsSync(DATA_SYNC_METADATA_FILE)) {
+    try {
+      data = JSON.parse(readFileSync(DATA_SYNC_METADATA_FILE, 'utf-8'));
+    } catch {
+      console.error('[DataSyncMetadata] Existing file corrupt, starting fresh');
+    }
+  }
+
+  data.models[modelName] = {
+    last_sync_timestamp: new Date().toISOString(),
+    last_max_write_date: maxWriteDate,
+    records_synced: recordCount,
+    sync_duration_ms: durationMs,
+  };
+
+  writeFileSync(DATA_SYNC_METADATA_FILE, JSON.stringify(data, null, 2));
+  console.error(`[DataSyncMetadata] Saved: ${modelName} last_write_date=${maxWriteDate}`);
+}
+
+/**
+ * Clear data sync metadata for a model (forces full sync next time)
+ *
+ * @param modelName - Odoo model name
+ */
+export function clearDataSyncMetadata(modelName: string): void {
+  if (!existsSync(DATA_SYNC_METADATA_FILE)) return;
+
+  try {
+    const data: DataSyncMetadataStore = JSON.parse(readFileSync(DATA_SYNC_METADATA_FILE, 'utf-8'));
+    delete data.models[modelName];
+    writeFileSync(DATA_SYNC_METADATA_FILE, JSON.stringify(data, null, 2));
+    console.error(`[DataSyncMetadata] Cleared metadata for ${modelName}`);
+  } catch (error) {
+    console.error(`[DataSyncMetadata] Failed to clear: ${error}`);
+  }
+}
+
+/**
+ * Get full data sync metadata for a model
+ *
+ * @param modelName - Odoo model name
+ * @returns DataSyncModelMetadata or null if never synced
+ */
+export function getDataSyncMetadata(modelName: string): DataSyncModelMetadata | null {
+  if (!existsSync(DATA_SYNC_METADATA_FILE)) return null;
+
+  try {
+    const data: DataSyncMetadataStore = JSON.parse(readFileSync(DATA_SYNC_METADATA_FILE, 'utf-8'));
+    return data.models[modelName] || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get all data sync metadata
+ *
+ * @returns Full metadata store or empty object
+ */
+export function getAllDataSyncMetadata(): Record<string, DataSyncModelMetadata> {
+  if (!existsSync(DATA_SYNC_METADATA_FILE)) return {};
+
+  try {
+    const data: DataSyncMetadataStore = JSON.parse(readFileSync(DATA_SYNC_METADATA_FILE, 'utf-8'));
+    return data.models;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Find maximum write_date from an array of records
+ *
+ * @param records - Array of Odoo records with write_date field
+ * @returns ISO date string of maximum write_date, or null if none found
+ */
+export function findMaxWriteDate(records: Record<string, unknown>[]): string | null {
+  let maxDate: Date | null = null;
+
+  for (const record of records) {
+    const writeDate = record.write_date;
+    if (typeof writeDate === 'string') {
+      const date = new Date(writeDate);
+      if (!isNaN(date.getTime()) && (!maxDate || date > maxDate)) {
+        maxDate = date;
+      }
+    }
+  }
+
+  return maxDate?.toISOString() || null;
+}

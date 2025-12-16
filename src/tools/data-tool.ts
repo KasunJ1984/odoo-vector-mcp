@@ -70,12 +70,18 @@ If any field is missing from schema, sync will ABORT with error.
 Run schema sync first if needed.
 
 **DEFAULT BEHAVIOR:**
-- Syncs ALL records in the table (including archived/inactive)
-- No limit by default - full table sync
+- INCREMENTAL sync by default - only syncs new/updated records since last sync
+- First sync is always FULL (no previous timestamp exists)
+- Use force_full=true to force full sync when needed
 - Use test_limit ONLY for debugging
+
+**INCREMENTAL SYNC:**
+After first sync, only records with write_date > last_sync_timestamp are fetched.
+This dramatically reduces sync time for large tables with few changes.
 
 **EXAMPLES:**
 - Sync CRM leads: \`{ "command": "transfer_crm.lead_1984" }\`
+- Force full sync: \`{ "command": "transfer_crm.lead_1984", "force_full": true }\`
 - Sync partners: \`{ "command": "transfer_res.partner_1984" }\`
 - Exclude archived: \`{ "command": "transfer_res.partner_1984", "include_archived": false }\`
 - Test with 10 records: \`{ "command": "transfer_crm.lead_1984", "test_limit": 10 }\``,
@@ -118,6 +124,8 @@ Run schema sync first if needed.
           id_field_id: discoveredConfig.id_field_id,
           include_archived: input.include_archived,
           test_limit: input.test_limit,
+          incremental: input.incremental,
+          force_full: input.force_full,
         };
 
         // Progress tracking
@@ -139,6 +147,7 @@ Run schema sync first if needed.
           lines.push(`Data Sync Complete`);
           lines.push(`===================`);
           lines.push(`Model: ${result.model_name}`);
+          lines.push(`Sync Type: ${result.sync_type || 'full'}`);
           lines.push(`Records Processed: ${result.records_processed}`);
           lines.push(`Records Embedded: ${result.records_embedded}`);
           lines.push(`Duration: ${(result.duration_ms / 1000).toFixed(1)}s`);
