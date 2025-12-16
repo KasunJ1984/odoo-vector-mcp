@@ -35,6 +35,7 @@ import {
   voyageCircuitBreaker,
   CircuitBreakerOpenError,
 } from './circuit-breaker.js';
+import { recordSyncComplete } from './metrics.js';
 import { DATA_TRANSFORM_CONFIG, QDRANT_CONFIG } from '../constants.js';
 import type {
   DataTransformConfig,
@@ -965,13 +966,23 @@ export async function syncModelData(
       );
     }
 
+    // Record sync metrics (Stage 5)
+    const durationMs = Date.now() - startTime;
+    recordSyncComplete(
+      config.model_name,
+      errors.length === 0,
+      totalProcessed,
+      totalEmbedded,
+      durationMs
+    );
+
     return {
       success: errors.length === 0,
       model_name: config.model_name,
       records_processed: totalProcessed,
       records_embedded: totalEmbedded,
       records_failed: totalProcessed - totalEmbedded,
-      duration_ms: Date.now() - startTime,
+      duration_ms: durationMs,
       errors: errors.length > 0 ? errors : undefined,
       restricted_fields: restrictedFieldsResult,
       warnings,
@@ -989,13 +1000,23 @@ export async function syncModelData(
       })
     );
 
+    // Record sync metrics for failed sync (Stage 5)
+    const durationMs = Date.now() - startTime;
+    recordSyncComplete(
+      config.model_name,
+      false,
+      0,
+      0,
+      durationMs
+    );
+
     return {
       success: false,
       model_name: config.model_name,
       records_processed: 0,
       records_embedded: 0,
       records_failed: 0,
-      duration_ms: Date.now() - startTime,
+      duration_ms: durationMs,
       errors: [errMsg],
       restricted_fields: restrictedFieldsResult,
       warnings,

@@ -12,6 +12,7 @@
  * 5. dlq_status - Check Dead Letter Queue status
  * 6. dlq_clear - Clear failed records from DLQ
  * 7. circuit_status - Check circuit breaker status for external services
+ * 8. sync_metrics - Get sync operation metrics and statistics
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -28,6 +29,7 @@ import {
 import { previewEncodingMap } from '../services/data-transformer.js';
 import { getDLQStats, clearDLQ } from '../services/dlq.js';
 import { getCircuitBreakerStates, resetAllCircuitBreakers } from '../services/circuit-breaker.js';
+import { getMetrics, resetMetrics, formatMetricsSummary } from '../services/metrics.js';
 
 // =============================================================================
 // TOOL REGISTRATION
@@ -601,5 +603,64 @@ services (Odoo, Qdrant, Voyage AI) are unhealthy.
     }
   );
 
-  console.error('[DataTool] Registered 7 data tools: transform_data, preview_encoding, data_status, cleanup_deleted, dlq_status, dlq_clear, circuit_status');
+  // =========================================================================
+  // SYNC METRICS TOOL
+  // =========================================================================
+
+  server.tool(
+    'sync_metrics',
+    `Get sync operation metrics and statistics.
+
+**SHOWS:**
+- Total syncs (successful/failed)
+- Success rate percentage
+- Records processed/embedded/failed
+- Total sync duration
+- Per-model breakdown with averages
+- Circuit breaker states
+
+**USE CASES:**
+- Monitor sync health over time
+- Identify problematic models
+- Track sync performance
+- Debug sync failures
+
+**OPTIONS:**
+- reset: Clear all metrics and start fresh
+
+**NOTE:** Metrics are stored in memory and reset when the server restarts.`,
+    {
+      reset: z.boolean().optional().describe('Reset all metrics to zero'),
+    },
+    async (args) => {
+      try {
+        if (args.reset) {
+          resetMetrics();
+          return { content: [{ type: 'text', text: 'All sync metrics have been reset.' }] };
+        }
+
+        // Get formatted metrics summary
+        const summary = formatMetricsSummary();
+
+        // Add circuit breaker status
+        const cbStates = getCircuitBreakerStates();
+        const cbLines: string[] = [
+          '',
+          'Circuit Breakers:',
+        ];
+        for (const [service, stats] of Object.entries(cbStates)) {
+          const stateIcon = stats.state === 'closed' ? '[OK]' :
+                           stats.state === 'open' ? '[OPEN]' : '[TEST]';
+          cbLines.push(`  ${stateIcon} ${service}: ${stats.state} (${stats.consecutiveFailures} failures)`);
+        }
+
+        return { content: [{ type: 'text', text: summary + cbLines.join('\n') }] };
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: 'text', text: `Error: ${errMsg}` }] };
+      }
+    }
+  );
+
+  console.error('[DataTool] Registered 8 data tools: transform_data, preview_encoding, data_status, cleanup_deleted, dlq_status, dlq_clear, circuit_status, sync_metrics');
 }
