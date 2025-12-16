@@ -530,38 +530,64 @@ export async function syncModelData(
     let totalEmbedded = 0;
     const maxRecords = config.test_limit || totalRecords;
 
-    while (offset < maxRecords) {
-      const limit = Math.min(fetchBatchSize, maxRecords - offset);
+    // ==========================================================================
+    // ASYNC PIPELINE: Fetch batch N+1 while embedding batch N
+    // This hides network latency by overlapping fetch and embed operations
+    // ==========================================================================
 
-      // Step 1: Fetch batch from Odoo with resilient handling
-      const batchResult = await client.searchReadWithRetry<Record<string, unknown>>(
+    // Helper function to fetch a batch with resilient field handling
+    const fetchBatchAsync = async (batchOffset: number) => {
+      const limit = Math.min(fetchBatchSize, maxRecords - batchOffset);
+      return client.searchReadWithRetry<Record<string, unknown>>(
         config.model_name,
         domain,
         currentFieldsToFetch,
-        { limit, offset, order: 'id', context },
+        { limit, offset: batchOffset, order: 'id', context },
         {
           maxRetries: 5,
           onFieldRestricted: (field, reason) => {
-            // New restriction found during batch - add to tracking
             if (!restrictedFieldsMap.has(field)) {
               restrictedFieldsMap.set(field, reason);
               const marker = reason === 'odoo_error' ? 'Restricted_odoo_error' : 'Restricted_from_API';
-              warnings.push(`Field '${field}' restricted (${reason}) - discovered during batch at offset ${offset}, marked as ${marker}`);
+              warnings.push(`Field '${field}' restricted (${reason}) - discovered during batch at offset ${batchOffset}, marked as ${marker}`);
               console.error(`[DataSync] New restricted field discovered: ${field} (${reason})`);
             }
           },
         }
       );
+    };
+
+    // Start first fetch (don't await yet)
+    let nextFetchPromise: ReturnType<typeof fetchBatchAsync> | null =
+      offset < maxRecords ? fetchBatchAsync(offset) : null;
+
+    while (nextFetchPromise) {
+      // Wait for current batch to complete
+      const batchResult = await nextFetchPromise;
+      const currentBatchOffset = offset;
+      offset += fetchBatchSize;
 
       // Update field list if new restrictions found
       if (batchResult.restrictedFields.length > 0) {
         currentFieldsToFetch = currentFieldsToFetch.filter(f => !restrictedFieldsMap.has(f));
-        // Encoding context already references the Map, so it's updated automatically
       }
 
       const batch = batchResult.records;
-      if (batch.length === 0) break;
+      if (batch.length === 0) {
+        nextFetchPromise = null;
+        break;
+      }
 
+      // Start fetching NEXT batch IMMEDIATELY (don't wait for embed)
+      // This is the key optimization - fetch N+1 runs in parallel with embed N
+      if (offset < maxRecords && batch.length === fetchBatchSize) {
+        console.error(`[DataSync] Starting prefetch of batch at offset ${offset}`);
+        nextFetchPromise = fetchBatchAsync(offset);
+      } else {
+        nextFetchPromise = null;
+      }
+
+      // Process current batch (encode, embed, upsert)
       totalProcessed += batch.length;
       const fetchPct = Math.round((totalProcessed / totalRecords) * 100);
       console.error(`[DataSync] Fetched batch: ${totalProcessed}/${totalRecords} records (${fetchPct}%)`);
@@ -606,15 +632,10 @@ export async function syncModelData(
           onProgress?.('embedding', totalEmbedded, totalRecords);
         } catch (error) {
           const errMsg = error instanceof Error ? error.message : String(error);
-          errors.push(`Embed batch at offset ${offset + i} failed: ${errMsg}`);
+          errors.push(`Embed batch at offset ${currentBatchOffset + i} failed: ${errMsg}`);
           console.error(`[DataSync] Embed error:`, errMsg);
         }
       }
-
-      offset += batch.length;
-
-      // Break if we got fewer records than requested
-      if (batch.length < limit) break;
     }
 
     onProgress?.('complete', totalEmbedded, totalRecords);
