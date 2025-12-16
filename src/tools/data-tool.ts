@@ -11,6 +11,7 @@
  * 4. cleanup_deleted - Remove records deleted in Odoo from vector DB
  * 5. dlq_status - Check Dead Letter Queue status
  * 6. dlq_clear - Clear failed records from DLQ
+ * 7. circuit_status - Check circuit breaker status for external services
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -26,6 +27,7 @@ import {
 } from '../services/data-sync.js';
 import { previewEncodingMap } from '../services/data-transformer.js';
 import { getDLQStats, clearDLQ } from '../services/dlq.js';
+import { getCircuitBreakerStates, resetAllCircuitBreakers } from '../services/circuit-breaker.js';
 
 // =============================================================================
 // TOOL REGISTRATION
@@ -535,5 +537,69 @@ Can clear all records or just records for a specific model.
     }
   );
 
-  console.error('[DataTool] Registered 6 data tools: transform_data, preview_encoding, data_status, cleanup_deleted, dlq_status, dlq_clear');
+  // =========================================================================
+  // CIRCUIT BREAKER STATUS TOOL
+  // =========================================================================
+
+  server.tool(
+    'circuit_status',
+    `Check circuit breaker status for external services.
+
+**CIRCUIT BREAKER PATTERN:**
+Circuit breakers prevent cascading failures by "failing fast" when external
+services (Odoo, Qdrant, Voyage AI) are unhealthy.
+
+**STATES:**
+- CLOSED (healthy): Normal operation, requests pass through
+- OPEN (failing): Service unhealthy, requests rejected immediately
+- HALF-OPEN (testing): Testing if service recovered
+
+**USE CASES:**
+- Diagnose sync failures caused by service outages
+- Monitor external service health
+- Reset circuits after manual intervention
+
+**THRESHOLDS:**
+- Odoo: Opens after 5 consecutive failures, resets after 60s
+- Qdrant: Opens after 3 consecutive failures, resets after 30s
+- Voyage: Opens after 4 consecutive failures, resets after 45s`,
+    {
+      reset: z.boolean().optional().describe('Reset all circuit breakers to closed state'),
+    },
+    async (args) => {
+      try {
+        if (args.reset) {
+          resetAllCircuitBreakers();
+          return { content: [{ type: 'text', text: 'All circuit breakers reset to CLOSED state.' }] };
+        }
+
+        const states = getCircuitBreakerStates();
+        const lines = [
+          'Circuit Breaker Status',
+          '======================',
+          '',
+        ];
+
+        for (const [service, stats] of Object.entries(states)) {
+          const stateIcon = stats.state === 'closed' ? '[OK]' :
+                           stats.state === 'open' ? '[OPEN]' : '[TEST]';
+          const lastFail = stats.lastFailureTime
+            ? `${Math.round((Date.now() - stats.lastFailureTime) / 1000)}s ago`
+            : 'never';
+
+          lines.push(`${stateIcon} ${service.toUpperCase()}: ${stats.state}`);
+          lines.push(`    Consecutive failures: ${stats.consecutiveFailures}`);
+          lines.push(`    Last failure: ${lastFail}`);
+          lines.push('');
+        }
+
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: 'text', text: `Error: ${errMsg}` }] };
+      }
+    }
+  );
+
+  console.error('[DataTool] Registered 7 data tools: transform_data, preview_encoding, data_status, cleanup_deleted, dlq_status, dlq_clear, circuit_status');
 }

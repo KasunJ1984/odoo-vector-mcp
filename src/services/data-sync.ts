@@ -29,6 +29,12 @@ import {
 } from './sync-metadata.js';
 import { addToDLQ } from './dlq.js';
 import { logInfo, logWarn, logError, generateSyncId } from './logger.js';
+import {
+  odooCircuitBreaker,
+  qdrantCircuitBreaker,
+  voyageCircuitBreaker,
+  CircuitBreakerOpenError,
+} from './circuit-breaker.js';
 import { DATA_TRANSFORM_CONFIG, QDRANT_CONFIG } from '../constants.js';
 import type {
   DataTransformConfig,
@@ -393,6 +399,9 @@ export async function syncModelData(
   const errors: string[] = [];
   const warnings: string[] = [];
 
+  // Circuit breaker context for logging correlation
+  const cbContext = { sync_id: syncId, model_name: config.model_name };
+
   // Structured log: Sync started
   logInfo('Sync started', {
     sync_id: syncId,
@@ -541,20 +550,43 @@ export async function syncModelData(
     }
 
     // Use resilient fetch for sample record to discover any restricted fields
-    const sampleResult = await client.searchReadWithRetry<Record<string, unknown>>(
-      config.model_name,
-      domain,
-      currentFieldsToFetch,
-      { limit: 1, context },
-      {
-        maxRetries: 5,
-        onFieldRestricted: (field, reason) => {
-          restrictedFieldsMap.set(field, reason);
-          const marker = reason === 'odoo_error' ? 'Restricted_odoo_error' : 'Restricted_from_API';
-          addWarning(`Field '${field}' restricted (${reason}) - will be marked as ${marker}`);
-        },
+    // Wrapped with circuit breaker to fail fast if Odoo is unhealthy
+    let sampleResult;
+    try {
+      sampleResult = await odooCircuitBreaker.execute(
+        () => client.searchReadWithRetry<Record<string, unknown>>(
+          config.model_name,
+          domain,
+          currentFieldsToFetch,
+          { limit: 1, context },
+          {
+            maxRetries: 5,
+            onFieldRestricted: (field, reason) => {
+              restrictedFieldsMap.set(field, reason);
+              const marker = reason === 'odoo_error' ? 'Restricted_odoo_error' : 'Restricted_from_API';
+              addWarning(`Field '${field}' restricted (${reason}) - will be marked as ${marker}`);
+            },
+          }
+        ),
+        cbContext
+      );
+    } catch (error) {
+      if (error instanceof CircuitBreakerOpenError) {
+        activeSyncs.delete(config.model_name);
+        return {
+          success: false,
+          model_name: config.model_name,
+          records_processed: 0,
+          records_embedded: 0,
+          records_failed: 0,
+          duration_ms: Date.now() - startTime,
+          errors: [`Odoo API circuit breaker is OPEN - ${error.message}`],
+          restricted_fields: [],
+          warnings,
+        };
       }
-    );
+      throw error;
+    }
 
     // Update field list with any restrictions found during sample fetch
     if (sampleResult.restrictedFields.length > 0) {
@@ -646,24 +678,28 @@ export async function syncModelData(
     // ==========================================================================
 
     // Helper function to fetch a batch with resilient field handling
+    // Wrapped with circuit breaker to fail fast if Odoo is unhealthy
     const fetchBatchAsync = async (batchOffset: number) => {
       const limit = Math.min(fetchBatchSize, maxRecords - batchOffset);
-      return client.searchReadWithRetry<Record<string, unknown>>(
-        config.model_name,
-        domain,
-        currentFieldsToFetch,
-        { limit, offset: batchOffset, order: 'id', context },
-        {
-          maxRetries: 5,
-          onFieldRestricted: (field, reason) => {
-            if (!restrictedFieldsMap.has(field)) {
-              restrictedFieldsMap.set(field, reason);
-              const marker = reason === 'odoo_error' ? 'Restricted_odoo_error' : 'Restricted_from_API';
-              addWarning(`Field '${field}' restricted (${reason}) - discovered during batch at offset ${batchOffset}, marked as ${marker}`);
-              console.error(`[DataSync] New restricted field discovered: ${field} (${reason})`);
-            }
-          },
-        }
+      return odooCircuitBreaker.execute(
+        () => client.searchReadWithRetry<Record<string, unknown>>(
+          config.model_name,
+          domain,
+          currentFieldsToFetch,
+          { limit, offset: batchOffset, order: 'id', context },
+          {
+            maxRetries: 5,
+            onFieldRestricted: (field, reason) => {
+              if (!restrictedFieldsMap.has(field)) {
+                restrictedFieldsMap.set(field, reason);
+                const marker = reason === 'odoo_error' ? 'Restricted_odoo_error' : 'Restricted_from_API';
+                addWarning(`Field '${field}' restricted (${reason}) - discovered during batch at offset ${batchOffset}, marked as ${marker}`);
+                console.error(`[DataSync] New restricted field discovered: ${field} (${reason})`);
+              }
+            },
+          }
+        ),
+        cbContext
       );
     };
 
@@ -678,7 +714,25 @@ export async function syncModelData(
     while (nextFetchPromise) {
       batchNumber++;
       // Wait for current batch to complete
-      const batchResult = await nextFetchPromise;
+      let batchResult;
+      try {
+        batchResult = await nextFetchPromise;
+      } catch (error) {
+        if (error instanceof CircuitBreakerOpenError) {
+          // Odoo circuit breaker opened - abort sync gracefully
+          logError('Odoo circuit open - aborting sync', {
+            sync_id: syncId,
+            model_name: config.model_name,
+            batch: batchNumber,
+            records_processed: totalProcessed,
+            records_embedded: totalEmbedded,
+            service: 'odoo',
+          });
+          addWarning(`Odoo API circuit breaker opened at batch ${batchNumber} - sync aborted`);
+          break; // Exit while loop, will return partial results
+        }
+        throw error;
+      }
       const currentBatchOffset = offset;
       offset += fetchBatchSize;
 
@@ -737,9 +791,41 @@ export async function syncModelData(
         const embedChunk = encodedBatch.slice(i, i + embedBatchSize);
 
         try {
-          // Generate embeddings
+          // Generate embeddings (wrapped with Voyage circuit breaker)
           const texts = embedChunk.map(r => r.encoded_string);
-          const embeddings = await embedBatch(texts, 'document');
+          let embeddings: number[][];
+          try {
+            embeddings = await voyageCircuitBreaker.execute(
+              () => embedBatch(texts, 'document'),
+              cbContext
+            );
+          } catch (cbError) {
+            if (cbError instanceof CircuitBreakerOpenError) {
+              // Voyage circuit open - send to DLQ and skip this chunk
+              for (const record of embedChunk) {
+                addToDLQ({
+                  record_id: record.record_id,
+                  model_name: record.model_name,
+                  model_id: record.model_id,
+                  failure_stage: 'embedding',
+                  error_message: cbError.message,
+                  batch_number: batchNumber,
+                  encoded_string: record.encoded_string,
+                  failed_at: new Date().toISOString(),
+                  retry_count: 0,
+                });
+              }
+              logError('Voyage circuit open - batch to DLQ', {
+                sync_id: syncId,
+                model_name: config.model_name,
+                batch: batchNumber,
+                records_to_dlq: embedChunk.length,
+                service: 'voyage',
+              });
+              continue; // Skip this chunk, try next
+            }
+            throw cbError;
+          }
 
           // Build data points
           const points: DataPoint[] = embedChunk.map((record, idx) => ({
@@ -756,8 +842,39 @@ export async function syncModelData(
             } as DataPayload,
           }));
 
-          // Upsert to Qdrant
-          await upsertDataPoints(points);
+          // Upsert to Qdrant (wrapped with Qdrant circuit breaker)
+          try {
+            await qdrantCircuitBreaker.execute(
+              () => upsertDataPoints(points),
+              cbContext
+            );
+          } catch (cbError) {
+            if (cbError instanceof CircuitBreakerOpenError) {
+              // Qdrant circuit open - send to DLQ and skip this chunk
+              for (const record of embedChunk) {
+                addToDLQ({
+                  record_id: record.record_id,
+                  model_name: record.model_name,
+                  model_id: record.model_id,
+                  failure_stage: 'upsert',
+                  error_message: cbError.message,
+                  batch_number: batchNumber,
+                  encoded_string: record.encoded_string,
+                  failed_at: new Date().toISOString(),
+                  retry_count: 0,
+                });
+              }
+              logError('Qdrant circuit open - batch to DLQ', {
+                sync_id: syncId,
+                model_name: config.model_name,
+                batch: batchNumber,
+                records_to_dlq: embedChunk.length,
+                service: 'qdrant',
+              });
+              continue; // Skip this chunk, try next
+            }
+            throw cbError;
+          }
           totalEmbedded += embedChunk.length;
 
           const embedPct = Math.round((totalEmbedded / totalRecords) * 100);
