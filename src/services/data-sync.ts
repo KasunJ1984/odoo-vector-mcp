@@ -36,6 +36,32 @@ import type {
 } from '../types.js';
 
 // =============================================================================
+// CONCURRENT SYNC PREVENTION
+// =============================================================================
+
+/**
+ * Active sync tracking
+ *
+ * Prevents multiple syncs of the same model from running simultaneously.
+ * Key: model_name, Value: sync progress info
+ */
+const activeSyncs = new Map<string, { startTime: number; progress: number; totalRecords: number }>();
+
+/**
+ * Check if a sync is currently in progress for a model
+ */
+export function isSyncInProgress(modelName: string): boolean {
+  return activeSyncs.has(modelName);
+}
+
+/**
+ * Get all currently active syncs
+ */
+export function getActiveSyncs(): Map<string, { startTime: number; progress: number; totalRecords: number }> {
+  return new Map(activeSyncs);
+}
+
+// =============================================================================
 // DYNAMIC MODEL CONFIGURATION DISCOVERY
 // =============================================================================
 
@@ -307,8 +333,37 @@ export async function syncModelData(
   // Track restricted fields discovered during sync (Map: field → reason)
   const restrictedFieldsMap = new Map<string, FieldRestrictionReason>();
 
+  // ==========================================================================
+  // CONCURRENT SYNC PREVENTION - Check if sync already in progress
+  // ==========================================================================
+  if (activeSyncs.has(config.model_name)) {
+    const existing = activeSyncs.get(config.model_name)!;
+    const elapsed = Math.round((Date.now() - existing.startTime) / 1000);
+    const progressRecords = Math.round(existing.totalRecords * existing.progress / 100);
+    return {
+      success: false,
+      model_name: config.model_name,
+      records_processed: 0,
+      records_embedded: 0,
+      records_failed: 0,
+      duration_ms: 0,
+      errors: [
+        `Sync already in progress for ${config.model_name}`,
+        `Started: ${elapsed}s ago`,
+        `Progress: ${existing.progress}% (${progressRecords}/${existing.totalRecords} records)`,
+      ],
+      restricted_fields: [],
+      warnings: [],
+    };
+  }
+
+  // Acquire sync lock
+  activeSyncs.set(config.model_name, { startTime: Date.now(), progress: 0, totalRecords: 0 });
+  console.error(`[DataSync] Acquired sync lock for ${config.model_name}`);
+
   // Validate services are available
   if (!isEmbeddingServiceAvailable()) {
+    activeSyncs.delete(config.model_name); // Release lock before early return
     return {
       success: false,
       model_name: config.model_name,
@@ -323,6 +378,7 @@ export async function syncModelData(
   }
 
   if (!isVectorClientAvailable()) {
+    activeSyncs.delete(config.model_name); // Release lock before early return
     return {
       success: false,
       model_name: config.model_name,
@@ -466,6 +522,9 @@ export async function syncModelData(
     }
     onProgress?.('streaming', 0, totalRecords);
 
+    // Update sync lock with totalRecords
+    activeSyncs.set(config.model_name, { startTime, progress: 0, totalRecords });
+
     let offset = 0;
     let totalProcessed = 0;
     let totalEmbedded = 0;
@@ -541,6 +600,9 @@ export async function syncModelData(
           const embedPct = Math.round((totalEmbedded / totalRecords) * 100);
           console.error(`[DataSync] Embedded: ${totalEmbedded}/${totalRecords} records (${embedPct}%)`);
 
+          // Update sync progress for concurrent sync tracking
+          activeSyncs.set(config.model_name, { startTime, progress: embedPct, totalRecords });
+
           onProgress?.('embedding', totalEmbedded, totalRecords);
         } catch (error) {
           const errMsg = error instanceof Error ? error.message : String(error);
@@ -605,6 +667,10 @@ export async function syncModelData(
       restricted_fields: restrictedFieldsResult,
       warnings,
     };
+  } finally {
+    // Always release sync lock, even on error
+    activeSyncs.delete(config.model_name);
+    console.error(`[DataSync] Released sync lock for ${config.model_name}`);
   }
 }
 
