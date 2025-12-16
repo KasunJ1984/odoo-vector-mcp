@@ -192,8 +192,8 @@ export const CACHE_CONFIG = {
  * - transfer_sale.order_1984
  */
 export const DATA_TRANSFORM_CONFIG = {
-  /** Records per Odoo API call */
-  FETCH_BATCH_SIZE: 200,
+  /** Records per Odoo API call (increased from 200 to reduce API calls) */
+  FETCH_BATCH_SIZE: 500,
   /** Records per embedding API call (reduced from 100 to avoid Voyage token limits with many fields) */
   EMBED_BATCH_SIZE: 50,
   /**
