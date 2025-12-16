@@ -305,8 +305,9 @@ export class OdooClient {
             if (fieldToTest === 'id') continue; // Skip id, it's our safe base
 
             try {
-              // Test this single field with 'id' and limit=1
-              const testOptions = { ...options, limit: 1 };
+              // Test this field with 'id' and limit=2 (need 2+ records to trigger singleton bugs)
+              // Singleton errors only occur when self has multiple records, not with 1 record
+              const testOptions = { ...options, limit: 2 };
               await this.searchRead<T>(model, domain, ['id', fieldToTest], testOptions);
 
               // Success - this field is safe
