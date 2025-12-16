@@ -27,8 +27,8 @@ import {
   isSingletonError,
 } from '../utils/odoo-error-parser.js';
 
-// Timeout for API calls (30 seconds)
-const API_TIMEOUT = 30000;
+// Timeout for API calls (2 minutes - needed for large batch operations with many fields)
+const API_TIMEOUT = 120000;
 
 /**
  * Simple timeout wrapper for promises
