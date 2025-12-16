@@ -41,6 +41,40 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 }
 
 /**
+ * Calculate exponential backoff delay with jitter
+ *
+ * Formula: min(baseMs * 2^attempt, maxMs) + random jitter
+ * Jitter prevents "thundering herd" when multiple clients retry simultaneously
+ *
+ * Example progression (with 20% max jitter):
+ * - Attempt 0: 1000-1200ms
+ * - Attempt 1: 2000-2400ms
+ * - Attempt 2: 4000-4800ms
+ * - Attempt 3: 8000-9600ms
+ * - Attempt 4: 16000-19200ms
+ *
+ * @param attempt - Zero-indexed attempt number (0 = first retry)
+ * @param baseMs - Base delay in milliseconds (default: 1000ms)
+ * @param maxMs - Maximum delay cap (default: 30000ms)
+ * @returns Delay in milliseconds with jitter applied
+ */
+function calculateBackoffWithJitter(attempt: number, baseMs = 1000, maxMs = 30000): number {
+  // Exponential: 1s, 2s, 4s, 8s, 16s... capped at maxMs
+  const exponentialDelay = Math.min(baseMs * Math.pow(2, attempt), maxMs);
+  // Add 0-20% random jitter to prevent synchronized retries
+  const jitter = exponentialDelay * 0.2 * Math.random();
+  return Math.floor(exponentialDelay + jitter);
+}
+
+/**
+ * Sleep for the specified duration
+ * @param ms - Duration in milliseconds
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
  * Odoo XML-RPC client
  */
 export class OdooClient {
@@ -301,8 +335,16 @@ export class OdooClient {
           const problematicFields: string[] = [];
 
           // Test each non-id field individually
+          let fieldTestCount = 0;
           for (const fieldToTest of currentFields) {
             if (fieldToTest === 'id') continue; // Skip id, it's our safe base
+
+            // Small delay between field tests to avoid hammering API
+            if (fieldTestCount > 0) {
+              const testDelay = calculateBackoffWithJitter(0, 200, 1000); // Shorter delays: 200-240ms
+              await sleep(testDelay);
+            }
+            fieldTestCount++;
 
             try {
               // Test this field with 'id' and limit=2 (need 2+ records to trigger singleton bugs)
@@ -350,6 +392,12 @@ export class OdooClient {
 
           // Retry with safe fields only
           retryCount++;
+
+          // Exponential backoff with jitter before retry
+          const backoffMs = calculateBackoffWithJitter(retryCount - 1);
+          console.error(`[${model}] Retry ${retryCount}/${maxRetries} in ${backoffMs}ms (singleton error recovery)`);
+          await sleep(backoffMs);
+
           continue; // Go back to main while loop to retry
         }
 
@@ -399,7 +447,10 @@ export class OdooClient {
         }
 
         // Continue to next iteration with reduced field list
-        console.error(`[${model}] Retrying with ${currentFields.length} fields (attempt ${retryCount}/${maxRetries})`);
+        // Exponential backoff with jitter before retry
+        const backoffMs = calculateBackoffWithJitter(retryCount - 1);
+        console.error(`[${model}] Retry ${retryCount}/${maxRetries} in ${backoffMs}ms (fields reduced to ${currentFields.length})`);
+        await sleep(backoffMs);
       }
     }
 
