@@ -6,8 +6,9 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
-    "start:win": "set NODE_TLS_REJECT_UNAUTHORIZED=0 && node dist/index.js",
+    "start": "NODE_OPTIONS='--max-old-space-size=4096' node dist/index.js",
+    "start:win": "set NODE_OPTIONS=--max-old-space-size=4096 && set NODE_TLS_REJECT_UNAUTHORIZED=0 && node dist/index.js",
+    "start:low-mem": "node dist/index.js",
     "dev": "tsx watch src/index.ts"
   },
   "dependencies": {

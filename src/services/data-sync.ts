@@ -67,6 +67,54 @@ export function getActiveSyncs(): Map<string, { startTime: number; progress: num
 }
 
 // =============================================================================
+// MEMORY MONITORING (Stage 0 - P0 CRITICAL)
+// =============================================================================
+
+/**
+ * Memory usage thresholds for logging
+ */
+const MEMORY_LOG_INTERVAL_BATCHES = 10; // Log memory every N batches
+const MEMORY_WARNING_THRESHOLD_MB = 512; // Warn if heap used exceeds this
+const MEMORY_CRITICAL_THRESHOLD_MB = 768; // Critical warning threshold
+
+/**
+ * Log current memory usage with heap statistics
+ *
+ * Uses Node.js process.memoryUsage() to get:
+ * - heapUsed: Actual memory used by JS objects
+ * - heapTotal: Total heap size allocated
+ * - external: Memory used by C++ objects bound to JS
+ * - rss: Resident Set Size (total memory allocated for process)
+ */
+function logMemoryUsage(context: string, batchNumber?: number): void {
+  const mem = process.memoryUsage();
+  const heapUsedMB = Math.round(mem.heapUsed / 1024 / 1024);
+  const heapTotalMB = Math.round(mem.heapTotal / 1024 / 1024);
+  const rssMB = Math.round(mem.rss / 1024 / 1024);
+
+  // Determine log level based on heap usage
+  let level = 'info';
+  if (heapUsedMB >= MEMORY_CRITICAL_THRESHOLD_MB) {
+    level = 'CRITICAL';
+  } else if (heapUsedMB >= MEMORY_WARNING_THRESHOLD_MB) {
+    level = 'WARNING';
+  }
+
+  const batchInfo = batchNumber !== undefined ? ` batch=${batchNumber}` : '';
+  console.error(
+    `[Memory ${level}] ${context}${batchInfo}: ` +
+    `heap=${heapUsedMB}/${heapTotalMB}MB, rss=${rssMB}MB`
+  );
+}
+
+/**
+ * Check if memory logging should occur for this batch
+ */
+function shouldLogMemory(batchNumber: number): boolean {
+  return batchNumber % MEMORY_LOG_INTERVAL_BATCHES === 0;
+}
+
+// =============================================================================
 // DYNAMIC MODEL CONFIGURATION DISCOVERY
 // =============================================================================
 
@@ -335,6 +383,17 @@ export async function syncModelData(
   const errors: string[] = [];
   const warnings: string[] = [];
 
+  // MEMORY OPTIMIZATION: Limit warnings array to prevent unbounded growth
+  const MAX_WARNINGS = 100;
+  const addWarning = (msg: string): void => {
+    if (warnings.length < MAX_WARNINGS) {
+      warnings.push(msg);
+    } else if (warnings.length === MAX_WARNINGS) {
+      warnings.push(`... and more warnings (truncated at ${MAX_WARNINGS})`);
+    }
+    // Silently ignore beyond MAX_WARNINGS to prevent memory growth
+  };
+
   // Track restricted fields discovered during sync (Map: field → reason)
   const restrictedFieldsMap = new Map<string, FieldRestrictionReason>();
 
@@ -474,7 +533,7 @@ export async function syncModelData(
         onFieldRestricted: (field, reason) => {
           restrictedFieldsMap.set(field, reason);
           const marker = reason === 'odoo_error' ? 'Restricted_odoo_error' : 'Restricted_from_API';
-          warnings.push(`Field '${field}' restricted (${reason}) - will be marked as ${marker}`);
+          addWarning(`Field '${field}' restricted (${reason}) - will be marked as ${marker}`);
         },
       }
     );
@@ -560,8 +619,8 @@ export async function syncModelData(
     let totalEmbedded = 0;
     const maxRecords = config.test_limit || totalRecords;
 
-    // Track all processed records for finding max write_date (for incremental sync)
-    const allProcessedRecords: Record<string, unknown>[] = [];
+    // Track max write_date incrementally (MEMORY OPTIMIZATION: don't store all records!)
+    let maxWriteDate: string | null = null;
 
     // ==========================================================================
     // ASYNC PIPELINE: Fetch batch N+1 while embedding batch N
@@ -582,7 +641,7 @@ export async function syncModelData(
             if (!restrictedFieldsMap.has(field)) {
               restrictedFieldsMap.set(field, reason);
               const marker = reason === 'odoo_error' ? 'Restricted_odoo_error' : 'Restricted_from_API';
-              warnings.push(`Field '${field}' restricted (${reason}) - discovered during batch at offset ${batchOffset}, marked as ${marker}`);
+              addWarning(`Field '${field}' restricted (${reason}) - discovered during batch at offset ${batchOffset}, marked as ${marker}`);
               console.error(`[DataSync] New restricted field discovered: ${field} (${reason})`);
             }
           },
@@ -594,7 +653,12 @@ export async function syncModelData(
     let nextFetchPromise: ReturnType<typeof fetchBatchAsync> | null =
       offset < maxRecords ? fetchBatchAsync(offset) : null;
 
+    // Memory monitoring - log at sync start
+    let batchNumber = 0;
+    logMemoryUsage(`${config.model_name} sync start`);
+
     while (nextFetchPromise) {
+      batchNumber++;
       // Wait for current batch to complete
       const batchResult = await nextFetchPromise;
       const currentBatchOffset = offset;
@@ -625,8 +689,18 @@ export async function syncModelData(
       const fetchPct = Math.round((totalProcessed / totalRecords) * 100);
       console.error(`[DataSync] Fetched batch: ${totalProcessed}/${totalRecords} records (${fetchPct}%)`);
 
-      // Track records for incremental sync metadata
-      allProcessedRecords.push(...batch);
+      // MEMORY OPTIMIZATION: Track max write_date incrementally instead of storing all records
+      const batchMaxWriteDate = findMaxWriteDate(batch);
+      if (batchMaxWriteDate) {
+        if (!maxWriteDate || batchMaxWriteDate > maxWriteDate) {
+          maxWriteDate = batchMaxWriteDate;
+        }
+      }
+
+      // Memory monitoring - log every N batches to track heap growth
+      if (shouldLogMemory(batchNumber)) {
+        logMemoryUsage(config.model_name, batchNumber);
+      }
 
       // Step 2: Encode batch with restricted field markers
       const encodedBatch = transformRecords(batch, encodingMap, config, encodingContext);
@@ -677,6 +751,9 @@ export async function syncModelData(
     onProgress?.('complete', totalEmbedded, totalRecords);
     console.error(`[DataSync] Complete: ${totalEmbedded}/${totalProcessed} records embedded`);
 
+    // Memory monitoring - log at sync end to verify no memory leak
+    logMemoryUsage(`${config.model_name} sync complete`, batchNumber);
+
     if (restrictedFieldsMap.size > 0) {
       console.error(`[DataSync] Restricted fields (${restrictedFieldsMap.size}): ${Array.from(restrictedFieldsMap.keys()).join(', ')}`);
     }
@@ -693,16 +770,14 @@ export async function syncModelData(
     // ==========================================================================
     // SAVE INCREMENTAL SYNC METADATA
     // ==========================================================================
-    if (totalEmbedded > 0) {
-      const maxWriteDate = findMaxWriteDate(allProcessedRecords);
-      if (maxWriteDate) {
-        saveDataSyncMetadata(
-          config.model_name,
-          maxWriteDate,
-          totalEmbedded,
-          Date.now() - startTime
-        );
-      }
+    if (totalEmbedded > 0 && maxWriteDate) {
+      // maxWriteDate was tracked incrementally during batch processing (memory efficient!)
+      saveDataSyncMetadata(
+        config.model_name,
+        maxWriteDate,
+        totalEmbedded,
+        Date.now() - startTime
+      );
     }
 
     return {
