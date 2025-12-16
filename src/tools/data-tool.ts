@@ -11,6 +11,7 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
 import { TransformDataSchema, PreviewEncodingSchema } from '../schemas/index.js';
 import type { TransformDataInput, PreviewEncodingInput } from '../schemas/index.js';
 import {
@@ -18,6 +19,7 @@ import {
   getDataSyncStatus,
   extractModelNameFromCommand,
   discoverModelConfig,
+  cleanupDeletedRecords,
 } from '../services/data-sync.js';
 import { previewEncodingMap } from '../services/data-transformer.js';
 
@@ -346,5 +348,104 @@ Shows:
     }
   );
 
-  console.error('[DataTool] Registered 3 data tools: transform_data, preview_encoding, data_status');
+  // =========================================================================
+  // CLEANUP DELETED RECORDS TOOL
+  // =========================================================================
+
+  server.tool(
+    'cleanup_deleted',
+    `Remove records from vector DB that were deleted in Odoo.
+
+**HOW IT WORKS:**
+1. Fetches all record IDs from Odoo (including archived)
+2. Fetches all record IDs from vector DB for the model
+3. Compares and finds IDs that exist in vector but not in Odoo
+4. Deletes those stale records from vector DB
+
+**USE CASES:**
+- After deleting records in Odoo
+- Periodic maintenance to keep vector DB clean
+- After data migration or cleanup in Odoo
+
+**EXAMPLES:**
+- Cleanup res.partner: \`{ "model_name": "res.partner" }\`
+- Cleanup crm.lead: \`{ "model_name": "crm.lead" }\``,
+    {
+      model_name: z.string().describe('Odoo model name to cleanup (e.g., "res.partner")'),
+    },
+    async (args) => {
+      try {
+        const modelName = args.model_name as string;
+        if (!modelName) {
+          return {
+            content: [{
+              type: 'text',
+              text: 'Error: model_name is required',
+            }],
+          };
+        }
+
+        // Discover model configuration from schema
+        let discoveredConfig;
+        try {
+          discoveredConfig = discoverModelConfig(modelName);
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : String(error);
+          return {
+            content: [{
+              type: 'text',
+              text: `Model Discovery Failed\n======================\n${errMsg}`,
+            }],
+          };
+        }
+
+        // Execute cleanup
+        const result = await cleanupDeletedRecords(
+          discoveredConfig.model_name,
+          discoveredConfig.model_id
+        );
+
+        // Format result
+        const lines: string[] = [];
+        lines.push(`Cleanup Complete`);
+        lines.push(`================`);
+        lines.push(`Model: ${result.model_name}`);
+        lines.push(`Records Deleted: ${result.deleted}`);
+        lines.push(`Duration: ${(result.duration_ms / 1000).toFixed(1)}s`);
+
+        if (result.deleted > 0 && result.deleted_ids.length <= 20) {
+          lines.push(``);
+          lines.push(`Deleted Record IDs: ${result.deleted_ids.join(', ')}`);
+        } else if (result.deleted > 20) {
+          lines.push(``);
+          lines.push(`Deleted Record IDs (first 20): ${result.deleted_ids.slice(0, 20).join(', ')}...`);
+        }
+
+        if (result.errors.length > 0) {
+          lines.push(``);
+          lines.push(`Errors:`);
+          for (const error of result.errors) {
+            lines.push(`  - ${error}`);
+          }
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: lines.join('\n'),
+          }],
+        };
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{
+            type: 'text',
+            text: `Error: ${errMsg}`,
+          }],
+        };
+      }
+    }
+  );
+
+  console.error('[DataTool] Registered 4 data tools: transform_data, preview_encoding, data_status, cleanup_deleted');
 }

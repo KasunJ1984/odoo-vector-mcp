@@ -789,3 +789,174 @@ export async function getDataSyncStatus(): Promise<{
     };
   }
 }
+
+// =============================================================================
+// DELETED RECORD CLEANUP
+// =============================================================================
+
+/**
+ * Result of cleanup operation
+ */
+export interface CleanupResult {
+  /** Number of records deleted from vector DB */
+  deleted: number;
+  /** Model name that was cleaned */
+  model_name: string;
+  /** IDs that were in vector DB but not in Odoo */
+  deleted_ids: number[];
+  /** Errors encountered during cleanup */
+  errors: string[];
+  /** Duration of cleanup operation in ms */
+  duration_ms: number;
+}
+
+/**
+ * Clean up deleted records from vector database
+ *
+ * Compares record IDs in vector DB against Odoo to find and remove
+ * records that were deleted in Odoo but still exist in vector DB.
+ *
+ * @param modelName - Odoo model name (e.g., 'res.partner')
+ * @param modelId - Model ID for generating point IDs
+ * @param onProgress - Optional progress callback
+ * @returns CleanupResult with deleted count and any errors
+ */
+export async function cleanupDeletedRecords(
+  modelName: string,
+  modelId: number,
+  onProgress?: (phase: string, current: number, total: number) => void
+): Promise<CleanupResult> {
+  const startTime = Date.now();
+  const errors: string[] = [];
+
+  console.error(`[Cleanup] Starting cleanup for ${modelName} (model_id=${modelId})`);
+
+  if (!isVectorClientAvailable()) {
+    return {
+      deleted: 0,
+      model_name: modelName,
+      deleted_ids: [],
+      errors: ['Vector client not available'],
+      duration_ms: Date.now() - startTime,
+    };
+  }
+
+  try {
+    const odooClient = getOdooClient();
+    const qdrantClient = getQdrantClient();
+
+    // Step 1: Get all record IDs from Odoo (including archived)
+    onProgress?.('fetching_odoo', 0, 1);
+    console.error(`[Cleanup] Fetching all record IDs from Odoo...`);
+
+    const context = { active_test: false }; // Include archived records
+    const odooRecords = await odooClient.searchRead<{ id: number }>(
+      modelName,
+      [],
+      ['id'],
+      { context }
+    );
+    const odooIds = new Set(odooRecords.map(r => r.id));
+    console.error(`[Cleanup] Found ${odooIds.size} records in Odoo`);
+
+    // Step 2: Get all point IDs from Qdrant for this model
+    onProgress?.('fetching_qdrant', 0, 1);
+    console.error(`[Cleanup] Fetching all record IDs from vector DB...`);
+
+    // Scroll through all points for this model
+    const vectorIds = new Set<number>();
+    let scrollOffset: string | number | null = null;
+    const scrollLimit = 1000;
+
+    do {
+      const scrollResult = await qdrantClient.scroll(QDRANT_CONFIG.COLLECTION, {
+        filter: {
+          must: [
+            { key: 'model_name', match: { value: modelName } },
+            { key: 'point_type', match: { value: 'data' } },
+          ],
+        },
+        limit: scrollLimit,
+        offset: scrollOffset ?? undefined,
+        with_payload: ['record_id'],
+      });
+
+      for (const point of scrollResult.points) {
+        const recordId = point.payload?.record_id;
+        if (typeof recordId === 'number') {
+          vectorIds.add(recordId);
+        }
+      }
+
+      // Handle next_page_offset which can be string, number, or Record
+      const nextOffset = scrollResult.next_page_offset;
+      scrollOffset = (typeof nextOffset === 'string' || typeof nextOffset === 'number')
+        ? nextOffset
+        : null;
+    } while (scrollOffset !== null);
+
+    console.error(`[Cleanup] Found ${vectorIds.size} records in vector DB`);
+
+    // Step 3: Find IDs in vector DB but not in Odoo (deleted)
+    onProgress?.('comparing', 0, 1);
+    const deletedIds: number[] = [];
+    for (const vectorId of vectorIds) {
+      if (!odooIds.has(vectorId)) {
+        deletedIds.push(vectorId);
+      }
+    }
+
+    console.error(`[Cleanup] Found ${deletedIds.length} deleted records to remove`);
+
+    if (deletedIds.length === 0) {
+      return {
+        deleted: 0,
+        model_name: modelName,
+        deleted_ids: [],
+        errors: [],
+        duration_ms: Date.now() - startTime,
+      };
+    }
+
+    // Step 4: Delete from Qdrant
+    onProgress?.('deleting', 0, deletedIds.length);
+    console.error(`[Cleanup] Deleting ${deletedIds.length} stale records from vector DB...`);
+
+    // Generate point IDs for deletion
+    const pointIdsToDelete = deletedIds.map(rid => generateDataPointId(modelId, rid));
+
+    try {
+      // Delete in batches if there are many
+      const deleteBatchSize = 1000;
+      for (let i = 0; i < pointIdsToDelete.length; i += deleteBatchSize) {
+        const batch = pointIdsToDelete.slice(i, i + deleteBatchSize);
+        await qdrantClient.delete(QDRANT_CONFIG.COLLECTION, {
+          points: batch,
+        });
+        onProgress?.('deleting', Math.min(i + deleteBatchSize, pointIdsToDelete.length), pointIdsToDelete.length);
+      }
+      console.error(`[Cleanup] Successfully deleted ${deletedIds.length} stale records`);
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      errors.push(`Failed to delete from Qdrant: ${errMsg}`);
+      console.error(`[Cleanup] Delete error: ${errMsg}`);
+    }
+
+    return {
+      deleted: errors.length === 0 ? deletedIds.length : 0,
+      model_name: modelName,
+      deleted_ids: deletedIds,
+      errors,
+      duration_ms: Date.now() - startTime,
+    };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return {
+      deleted: 0,
+      model_name: modelName,
+      deleted_ids: [],
+      errors: [errMsg],
+      duration_ms: Date.now() - startTime,
+    };
+  }
+}
