@@ -2,12 +2,15 @@
  * Data Transform Tool
  *
  * MCP tool for transforming and syncing Odoo table data to vector database.
- * Provides three tools:
+ * Provides tools:
  * 1. transform_data - Sync ANY model data (dynamic model discovery!)
  *    - Command format: transfer_[model.name]_1984
  *    - Examples: transfer_crm.lead_1984, transfer_res.partner_1984
  * 2. preview_encoding - Preview encoding map for any model (no sync)
  * 3. data_status - Check sync status in vector database
+ * 4. cleanup_deleted - Remove records deleted in Odoo from vector DB
+ * 5. dlq_status - Check Dead Letter Queue status
+ * 6. dlq_clear - Clear failed records from DLQ
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -22,6 +25,7 @@ import {
   cleanupDeletedRecords,
 } from '../services/data-sync.js';
 import { previewEncodingMap } from '../services/data-transformer.js';
+import { getDLQStats, clearDLQ } from '../services/dlq.js';
 
 // =============================================================================
 // TOOL REGISTRATION
@@ -447,5 +451,89 @@ Shows:
     }
   );
 
-  console.error('[DataTool] Registered 4 data tools: transform_data, preview_encoding, data_status, cleanup_deleted');
+  // =========================================================================
+  // DLQ STATUS TOOL
+  // =========================================================================
+
+  server.tool(
+    'dlq_status',
+    `Check Dead Letter Queue status - shows failed records that need attention.
+
+Shows:
+- Total failed records
+- Breakdown by model
+- Breakdown by failure stage (encoding/embedding/upsert)
+
+Use this to monitor sync health and identify records that failed.`,
+    {},
+    async () => {
+      try {
+        const stats = getDLQStats();
+        const lines = [
+          'Dead Letter Queue Status',
+          '========================',
+          `Total Failed Records: ${stats.total}`,
+        ];
+
+        if (stats.total === 0) {
+          lines.push('', 'No failed records in DLQ.');
+          return { content: [{ type: 'text', text: lines.join('\n') }] };
+        }
+
+        if (Object.keys(stats.by_model).length > 0) {
+          lines.push('', 'By Model:');
+          for (const [model, count] of Object.entries(stats.by_model)) {
+            lines.push(`  ${model}: ${count}`);
+          }
+        }
+
+        if (Object.keys(stats.by_stage).length > 0) {
+          lines.push('', 'By Failure Stage:');
+          for (const [stage, count] of Object.entries(stats.by_stage)) {
+            lines.push(`  ${stage}: ${count}`);
+          }
+        }
+
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: 'text', text: `Error: ${errMsg}` }] };
+      }
+    }
+  );
+
+  // =========================================================================
+  // DLQ CLEAR TOOL
+  // =========================================================================
+
+  server.tool(
+    'dlq_clear',
+    `Clear the Dead Letter Queue.
+
+Can clear all records or just records for a specific model.
+
+**EXAMPLES:**
+- Clear all: \`{ }\`
+- Clear specific model: \`{ "model_name": "crm.lead" }\``,
+    {
+      model_name: z.string().optional().describe('Model to clear (e.g., "crm.lead"). If not specified, clears ALL.'),
+    },
+    async (args) => {
+      try {
+        const modelName = args.model_name as string | undefined;
+        const cleared = clearDLQ(modelName);
+
+        const msg = modelName
+          ? `Cleared ${cleared} failed records for ${modelName}`
+          : `Cleared ${cleared} failed records from DLQ`;
+
+        return { content: [{ type: 'text', text: msg }] };
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: 'text', text: `Error: ${errMsg}` }] };
+      }
+    }
+  );
+
+  console.error('[DataTool] Registered 6 data tools: transform_data, preview_encoding, data_status, cleanup_deleted, dlq_status, dlq_clear');
 }

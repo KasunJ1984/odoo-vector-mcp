@@ -27,6 +27,7 @@ import {
   saveDataSyncMetadata,
   findMaxWriteDate,
 } from './sync-metadata.js';
+import { addToDLQ } from './dlq.js';
 import { DATA_TRANSFORM_CONFIG, QDRANT_CONFIG } from '../constants.js';
 import type {
   DataTransformConfig,
@@ -742,8 +743,24 @@ export async function syncModelData(
           onProgress?.('embedding', totalEmbedded, totalRecords);
         } catch (error) {
           const errMsg = error instanceof Error ? error.message : String(error);
-          errors.push(`Embed batch at offset ${currentBatchOffset + i} failed: ${errMsg}`);
-          console.error(`[DataSync] Embed error:`, errMsg);
+
+          // Send ALL records in this chunk to DLQ for later retry
+          for (const record of embedChunk) {
+            addToDLQ({
+              record_id: record.record_id,
+              model_name: record.model_name,
+              model_id: record.model_id,
+              failure_stage: 'embedding',
+              error_message: errMsg,
+              batch_number: batchNumber,
+              encoded_string: record.encoded_string,
+              failed_at: new Date().toISOString(),
+              retry_count: 0,
+            });
+          }
+
+          addWarning(`Embed batch at offset ${currentBatchOffset + i} failed: ${errMsg} (${embedChunk.length} records sent to DLQ)`);
+          console.error(`[DataSync] Embed error (${embedChunk.length} records to DLQ):`, errMsg);
         }
       }
     }
