@@ -194,8 +194,8 @@ export const CACHE_CONFIG = {
 export const DATA_TRANSFORM_CONFIG = {
   /** Records per Odoo API call */
   FETCH_BATCH_SIZE: 200,
-  /** Records per embedding API call */
-  EMBED_BATCH_SIZE: 100,
+  /** Records per embedding API call (reduced from 100 to avoid Voyage token limits with many fields) */
+  EMBED_BATCH_SIZE: 50,
   /**
    * Point ID multiplier to ensure no clash with schema field_ids
    * Point ID = model_id * 10_000_000 + record_id
